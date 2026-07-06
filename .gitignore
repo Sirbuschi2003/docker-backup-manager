@@ -6,3 +6,4 @@ data-live-test/
 .pytest_cache/
 *.sqlite3
 .env
+.claude/

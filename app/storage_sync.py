@@ -2,11 +2,14 @@
 Uploads/replicates a finished backup to configured off-site storage targets.
 
 Supported target types:
-  - local_path: any filesystem path reachable from inside the container. This
-    is how SMB and NFS shares are supported: the host mounts the share
-    (Synology/QNAP/UGREEN volume config, or /etc/fstab + docker bind mount on
-    Ubuntu) at some path, that path is bind-mounted into this container, and
-    is then selected here. We just recursively copy into it.
+  - local_path: any filesystem path already reachable from inside the
+    container (e.g. an NFS share, or an SMB share mounted at the host/OS
+    level and bind-mounted in). No credentials are entered in the app here -
+    authentication happened when the share was mounted outside the app.
+  - smb: a *real* in-app SMB/CIFS connection (server, share, username,
+    password) using a pure-Python SMB2/3 client (`smbprotocol`) - no host
+    mount, no privileged container needed. This is the option to use when you
+    want to type a username/password directly into the app.
   - s3: any S3-compatible object storage (AWS S3, MinIO, Wasabi, Backblaze B2,
     Ceph RGW, ...) via boto3, using access key/secret + endpoint URL.
   - rclone: shells out to the bundled `rclone` binary for every other backend
@@ -68,6 +71,53 @@ def sync_s3(backup_path: Path, config: dict) -> None:
         s3.upload_file(str(file_path), bucket, key)
 
 
+def _smb_remote_root(config: dict, key_root: str) -> str:
+    """Pure helper (no network) so the path-building logic is unit-testable."""
+    server = config["server"]
+    share = config["share"]
+    base = config.get("base_path", "").strip("/\\").replace("/", "\\")
+    root = f"\\\\{server}\\{share}"
+    if base:
+        root += "\\" + base
+    if key_root and key_root != ".":
+        root += "\\" + key_root.replace("/", "\\")
+    return root
+
+
+def _smb_register_session(config: dict):
+    import smbclient
+
+    username = config["username"]
+    domain = config.get("domain", "").strip()
+    if domain:
+        username = f"{domain}\\{username}"
+    smbclient.register_session(
+        config["server"],
+        username=username,
+        password=config["password"],
+        port=int(config.get("port") or 445),
+    )
+
+
+def sync_smb(backup_path: Path, config: dict) -> None:
+    import smbclient  # imported lazily so smbprotocol is only required if SMB targets are used
+
+    _smb_register_session(config)
+    key_root = _relative_key(backup_path)
+    remote_root = _smb_remote_root(config, key_root)
+    smbclient.makedirs(remote_root, exist_ok=True)
+
+    for file_path in Path(backup_path).rglob("*"):
+        if not file_path.is_file():
+            continue
+        rel = file_path.relative_to(backup_path)
+        remote_path = remote_root + "\\" + rel.as_posix().replace("/", "\\")
+        remote_dir = remote_path.rsplit("\\", 1)[0]
+        smbclient.makedirs(remote_dir, exist_ok=True)
+        with open(file_path, "rb") as src, smbclient.open_file(remote_path, mode="wb") as dst:
+            shutil.copyfileobj(src, dst)
+
+
 def sync_rclone(backup_path: Path, config: dict) -> None:
     remote = config["remote"]
     remote_path = config.get("remote_path", "").strip("/")
@@ -80,6 +130,7 @@ def sync_rclone(backup_path: Path, config: dict) -> None:
 
 SYNC_HANDLERS = {
     "local_path": sync_local_path,
+    "smb": sync_smb,
     "s3": sync_s3,
     "rclone": sync_rclone,
 }
@@ -94,9 +145,22 @@ def sync_to_target(backup_path: Path, target_type: str, config_json: str) -> Non
 
 
 def sync_to_all_targets(backup_path: Path, on_progress=None) -> list[dict]:
-    """Runs after a successful backup. Returns per-target results; never raises -
-    a failed off-site copy must not make the (already successful) local backup
-    look failed."""
+    """Runs after a successful ad-hoc (manually triggered) backup: syncs to
+    every enabled storage target. Scheduled backups instead use
+    sync_to_selected_targets() so each schedule can pick specific targets."""
+    return _sync_to_targets(backup_path, target_ids=None, on_progress=on_progress)
+
+
+def sync_to_selected_targets(backup_path: Path, target_ids: list[int], on_progress=None) -> list[dict]:
+    """Runs after a successful scheduled backup: syncs only to the explicitly
+    selected (and still enabled) storage targets. An empty list means no
+    off-site sync for this schedule."""
+    return _sync_to_targets(backup_path, target_ids=target_ids, on_progress=on_progress)
+
+
+def _sync_to_targets(backup_path: Path, target_ids: Optional[list[int]], on_progress=None) -> list[dict]:
+    """Never raises - a failed off-site copy must not make the (already
+    successful) local backup look failed."""
     from app.database import SessionLocal
     from app.models import StorageTarget
     import datetime
@@ -104,7 +168,12 @@ def sync_to_all_targets(backup_path: Path, on_progress=None) -> list[dict]:
     db = SessionLocal()
     results = []
     try:
-        targets = db.query(StorageTarget).filter(StorageTarget.enabled == True).all()  # noqa: E712
+        query = db.query(StorageTarget).filter(StorageTarget.enabled == True)  # noqa: E712
+        if target_ids is not None:
+            if not target_ids:
+                return []
+            query = query.filter(StorageTarget.id.in_(target_ids))
+        targets = query.all()
         for idx, target in enumerate(targets, start=1):
             if on_progress:
                 on_progress(f"Uploading to {target.name}", idx, len(targets))
@@ -143,6 +212,12 @@ def check_target_connection(target_type: str, config_json: str) -> None:
         )
         s3 = session.client("s3", endpoint_url=config.get("endpoint_url") or None)
         s3.head_bucket(Bucket=config["bucket"])
+    elif target_type == "smb":
+        import smbclient
+        _smb_register_session(config)
+        root = _smb_remote_root(config, "")
+        smbclient.makedirs(root, exist_ok=True)
+        smbclient.listdir(root)
     elif target_type == "rclone":
         remote = config["remote"]
         proc = subprocess.run(

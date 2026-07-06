@@ -1,3 +1,4 @@
+import json
 from typing import Optional
 
 from apscheduler.triggers.cron import CronTrigger
@@ -20,6 +21,7 @@ class SchedulePayload(BaseModel):
     cron_expression: str
     retention_count: int = 7
     retention_days: int = 0
+    storage_target_ids: list[int] = []
     enabled: bool = True
 
 
@@ -37,7 +39,8 @@ def list_schedules(db: Session = Depends(get_db), user: User = Depends(get_curre
         {
             "id": s.id, "name": s.name, "target_type": s.target_type, "target_ref": s.target_ref,
             "cron_expression": s.cron_expression, "retention_count": s.retention_count,
-            "retention_days": s.retention_days, "enabled": s.enabled,
+            "retention_days": s.retention_days,
+            "storage_target_ids": json.loads(s.storage_target_ids or "[]"), "enabled": s.enabled,
             "last_run_at": s.last_run_at.isoformat() + "Z" if s.last_run_at else None,
             "last_status": s.last_status,
         } for s in rows
@@ -50,7 +53,9 @@ def create_schedule(payload: SchedulePayload, db: Session = Depends(get_db), use
     if payload.target_type == "container" and not payload.target_ref:
         raise HTTPException(400, "target_ref (container name) is required for target_type=container")
 
-    sched = Schedule(**payload.dict())
+    data = payload.dict()
+    target_ids = data.pop("storage_target_ids")
+    sched = Schedule(storage_target_ids=json.dumps(target_ids), **data)
     db.add(sched)
     db.commit()
     db.refresh(sched)
@@ -67,8 +72,11 @@ def update_schedule(schedule_id: int, payload: SchedulePayload, db: Session = De
         raise HTTPException(404, "Schedule not found")
     _validate_cron(payload.cron_expression)
 
-    for k, v in payload.dict().items():
+    data = payload.dict()
+    target_ids = data.pop("storage_target_ids")
+    for k, v in data.items():
         setattr(sched, k, v)
+    sched.storage_target_ids = json.dumps(target_ids)
     db.commit()
 
     scheduler_module.remove_job(schedule_id)

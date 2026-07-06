@@ -53,6 +53,7 @@ class Schedule(Base):
     cron_expression = Column(String(64), nullable=False)  # standard 5-field cron
     retention_count = Column(Integer, default=7)
     retention_days = Column(Integer, default=0)
+    storage_target_ids = Column(Text, nullable=False, default="[]")  # JSON list of StorageTarget ids to sync to
     enabled = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     last_run_at = Column(DateTime, nullable=True)

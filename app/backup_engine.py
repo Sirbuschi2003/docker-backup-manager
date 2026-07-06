@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
+from app import encryption
 from app.config import BACKUPS_DIR, DOCKER_HELPER_IMAGE
 from app.docker_client import get_client
 
@@ -107,7 +108,8 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
     backup_dir = dest_root / sanitize_name(name) / ts
 
     volume_mounts = [m for m in attrs.get("Mounts", []) if m.get("Type") == "volume"]
-    total_steps = 3 + len(volume_mounts)  # inspect+networks, image, finalize, one per volume
+    encrypt = encryption.is_enabled()
+    total_steps = 3 + len(volume_mounts) + (1 if encrypt else 0)  # inspect+networks, image, finalize, one per volume, optional encrypt
 
     try:
         backup_dir.mkdir(parents=True, exist_ok=False)
@@ -160,6 +162,15 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
         }
         (backup_dir / "meta.json").write_text(json.dumps(meta, indent=2))
 
+        if encrypt:
+            step += 1
+            on_progress(step, "Encrypting backup", total_steps)
+
+            def encrypt_progress(label, idx, total):
+                on_progress(step, label, total_steps)
+
+            encryption.encrypt_directory_in_place(backup_dir, on_progress=encrypt_progress)
+
         size = dir_size_bytes(backup_dir)
         return BackupResult(ok=True, name=name, path=backup_dir, size_bytes=size, containers=[name])
     except Exception as exc:  # noqa: BLE001
@@ -210,6 +221,9 @@ def backup_landscape(dest_root: Path = BACKUPS_DIR, project_filter: Optional[str
         "errors": errors,
     }
     (landscape_dir / "meta.json").write_text(json.dumps(meta, indent=2))
+
+    if encryption.is_enabled():
+        encryption.encrypt_directory_in_place(landscape_dir)
 
     size = dir_size_bytes(landscape_dir)
     ok = len(errors) == 0

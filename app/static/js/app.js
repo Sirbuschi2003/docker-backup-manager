@@ -55,6 +55,73 @@ function toast(message, type = "ok") {
   setTimeout(() => el.remove(), 5000);
 }
 
+// ---------- global job tray (always visible, on every page) ----------
+let jobTrayEl;
+const toastedJobIds = new Set();
+const finishedJobHideAt = new Map(); // jobId -> timestamp when it should be removed from the tray
+
+function ensureJobTray() {
+  if (!jobTrayEl) {
+    jobTrayEl = document.createElement("div");
+    jobTrayEl.className = "job-tray";
+    document.body.appendChild(jobTrayEl);
+  }
+  return jobTrayEl;
+}
+
+function renderJobCard(job) {
+  const statusBadge = job.status === "running" ? "running" : job.status === "success" ? "ok" : "failed";
+  const statusLabel = job.status === "running" ? "läuft" : job.status === "success" ? "fertig" : "fehlgeschlagen";
+  return h(`
+    <div class="card job-card" data-job-id="${job.id}">
+      <div class="job-title"><span>${job.kind === "backup" ? "💾" : "♻️"} ${job.label}</span>
+        <span class="badge ${statusBadge}">${statusLabel}</span></div>
+      <div class="muted" style="font-size:.8rem">${job.step_name}</div>
+      <div class="progress-wrap">
+        <div class="progress-bar"><div style="width:${job.percent}%"></div></div>
+        <div class="progress-meta">
+          <span>Schritt ${job.current_step}/${job.total_steps}</span>
+          <span>${job.status === "running"
+            ? "Verstrichen: " + fmtDuration(job.elapsed_seconds) + (job.eta_seconds != null ? " · ETA " + fmtDuration(job.eta_seconds) : "")
+            : fmtDuration(job.elapsed_seconds)}</span>
+        </div>
+      </div>
+      ${job.error ? `<div class="error-msg">${job.error}</div>` : ""}
+    </div>
+  `);
+}
+
+async function pollGlobalJobs() {
+  let jobs;
+  try {
+    jobs = (await api("/api/jobs")).jobs;
+  } catch (e) { return; }
+
+  const now = Date.now();
+  for (const job of jobs) {
+    if (job.status !== "running") {
+      if (!toastedJobIds.has(job.id)) {
+        toastedJobIds.add(job.id);
+        toast(`${job.label}: ${job.status === "success" ? "erfolgreich abgeschlossen" : "fehlgeschlagen – " + job.error}`,
+              job.status === "success" ? "ok" : "error");
+        finishedJobHideAt.set(job.id, now + 4000);
+      }
+    }
+  }
+
+  const visible = jobs.filter((j) => j.status === "running" ||
+    (finishedJobHideAt.has(j.id) && finishedJobHideAt.get(j.id) > now));
+
+  const tray = ensureJobTray();
+  tray.innerHTML = "";
+  visible.slice(0, 5).forEach((job) => tray.appendChild(renderJobCard(job)));
+}
+
+function startGlobalJobPoller() {
+  pollGlobalJobs();
+  setInterval(pollGlobalJobs, 1500);
+}
+
 // ---------- render helpers ----------
 function h(html) {
   const t = document.createElement("template");
@@ -205,7 +272,13 @@ async function dashboardPage() {
         <div class="sub">${lastBackup ? fmtDate(lastBackup.created_at) : ""}</div>
       </div>
     </div>
-    <div class="section-title">Laufende & letzte Jobs</div>
+    ${overview.encryption_enabled
+      ? ""
+      : `<div class="card" style="margin-top:16px; border-color: var(--warn);">
+           ⚠️ Backups werden aktuell <strong>unverschlüsselt</strong> gespeichert. Setze
+           <span class="mono">DBM_ENCRYPTION_KEY</span>, um Verschlüsselung zu aktivieren (siehe Einstellungen).
+         </div>`}
+    <div class="section-title">Letzte Jobs</div>
     <div id="jobs-container" class="grid cols-3"></div>
   </div>`);
 
@@ -213,64 +286,9 @@ async function dashboardPage() {
   if (!jobsData.jobs.length) {
     jobsContainer.appendChild(h(`<div class="empty-state">Keine Jobs bisher</div>`));
   } else {
-    jobsData.jobs.slice(0, 6).forEach((job) => jobsContainer.appendChild(jobCard(job)));
+    jobsData.jobs.slice(0, 6).forEach((job) => jobsContainer.appendChild(renderJobCard(job)));
   }
   return wrap;
-}
-
-function jobCard(job) {
-  const statusBadge = job.status === "running" ? "running" : job.status === "success" ? "ok" : "failed";
-  const card = h(`
-    <div class="card job-card" data-job-id="${job.id}">
-      <div class="job-title"><span>${job.kind === "backup" ? "💾" : "♻️"} ${job.label}</span>
-        <span class="badge ${statusBadge}">${job.status}</span></div>
-      <div class="muted" style="font-size:.8rem">${job.step_name}</div>
-      <div class="progress-wrap">
-        <div class="progress-bar"><div style="width:${job.percent}%"></div></div>
-        <div class="progress-meta">
-          <span>${job.current_step}/${job.total_steps}</span>
-          <span>${job.status === "running" ? "Verstrichen: " + fmtDuration(job.elapsed_seconds) + (job.eta_seconds != null ? " · ETA " + fmtDuration(job.eta_seconds) : "") : fmtDuration(job.elapsed_seconds)}</span>
-        </div>
-      </div>
-      ${job.error ? `<div class="error-msg">${job.error}</div>` : ""}
-    </div>
-  `);
-  if (job.status === "running") pollJob(job.id, card);
-  return card;
-}
-
-function pollJob(jobId, card) {
-  const interval = setInterval(async () => {
-    try {
-      const job = await api(`/api/jobs/${jobId}`);
-      if (!card.isConnected) { clearInterval(interval); return; }
-      const fresh = jobCardInner(job);
-      card.innerHTML = fresh.innerHTML;
-      if (job.status !== "running") {
-        clearInterval(interval);
-        toast(`${job.label}: ${job.status === "success" ? "erfolgreich" : "fehlgeschlagen"}`,
-              job.status === "success" ? "ok" : "error");
-      }
-    } catch (e) { clearInterval(interval); }
-  }, 1500);
-}
-function jobCardInner(job) {
-  const statusBadge = job.status === "running" ? "running" : job.status === "success" ? "ok" : "failed";
-  return h(`
-    <div class="job-card">
-      <div class="job-title"><span>${job.kind === "backup" ? "💾" : "♻️"} ${job.label}</span>
-        <span class="badge ${statusBadge}">${job.status}</span></div>
-      <div class="muted" style="font-size:.8rem">${job.step_name}</div>
-      <div class="progress-wrap">
-        <div class="progress-bar"><div style="width:${job.percent}%"></div></div>
-        <div class="progress-meta">
-          <span>${job.current_step}/${job.total_steps}</span>
-          <span>${job.status === "running" ? "Verstrichen: " + fmtDuration(job.elapsed_seconds) + (job.eta_seconds != null ? " · ETA " + fmtDuration(job.eta_seconds) : "") : fmtDuration(job.elapsed_seconds)}</span>
-        </div>
-      </div>
-      ${job.error ? `<div class="error-msg">${job.error}</div>` : ""}
-    </div>
-  `);
 }
 
 // ---------- Containers ----------
@@ -303,9 +321,9 @@ async function containersPage() {
     row.querySelector("button").addEventListener("click", async (e) => {
       e.target.disabled = true;
       try {
-        const res = await api(`/api/containers/${encodeURIComponent(c.name)}/backup`, { method: "POST" });
+        await api(`/api/containers/${encodeURIComponent(c.name)}/backup`, { method: "POST" });
         toast(`Backup für ${c.name} gestartet`);
-        watchJobToast(res.job_id);
+        pollGlobalJobs();
       } catch (err) { toast(err.message, "error"); }
       e.target.disabled = false;
     });
@@ -314,26 +332,13 @@ async function containersPage() {
 
   wrap.querySelector("#backup-all-btn").addEventListener("click", async () => {
     try {
-      const res = await api("/api/backups/landscape", { method: "POST", body: JSON.stringify({}) });
+      await api("/api/backups/landscape", { method: "POST", body: JSON.stringify({}) });
       toast("Landschafts-Backup gestartet");
-      watchJobToast(res.job_id);
+      pollGlobalJobs();
     } catch (err) { toast(err.message, "error"); }
   });
 
   return wrap;
-}
-
-function watchJobToast(jobId) {
-  const interval = setInterval(async () => {
-    try {
-      const job = await api(`/api/jobs/${jobId}`);
-      if (job.status !== "running") {
-        clearInterval(interval);
-        toast(`${job.label}: ${job.status === "success" ? "erfolgreich abgeschlossen" : "fehlgeschlagen - " + job.error}`,
-              job.status === "success" ? "ok" : "error");
-      }
-    } catch (e) { clearInterval(interval); }
-  }, 2000);
 }
 
 // ---------- Backups ----------
@@ -423,11 +428,11 @@ function openRestoreModal(version) {
     const newName = overlay.querySelector("#restore-name").value.trim();
     const start = overlay.querySelector("#restore-start").checked;
     try {
-      const res = await api(`/api/backups/${version.id}/restore`, {
+      await api(`/api/backups/${version.id}/restore`, {
         method: "POST", body: JSON.stringify({ new_name: newName || null, start }),
       });
       toast("Wiederherstellung gestartet");
-      watchJobToast(res.job_id);
+      pollGlobalJobs();
       overlay.remove();
     } catch (e) { toast(e.message, "error"); }
   });
@@ -465,26 +470,29 @@ async function openLandscapeMembersModal(version) {
 
 // ---------- Schedules ----------
 async function schedulesPage() {
-  const data = await api("/api/schedules");
+  const [data, targetsData] = await Promise.all([api("/api/schedules"), api("/api/settings/storage-targets")]);
+  const targetById = Object.fromEntries(targetsData.targets.map((t) => [t.id, t.name]));
   const wrap = h(`<div>
     <div class="page-header"><h2>Zeitpläne</h2>
       <div class="actions"><button class="btn primary" id="new-schedule-btn">Neuer Zeitplan</button></div>
     </div>
     <div class="card" style="padding:0">
       <table>
-        <thead><tr><th>Name</th><th>Ziel</th><th>Cron</th><th>Aufbewahrung</th><th>Letzter Lauf</th><th>Status</th><th></th></tr></thead>
+        <thead><tr><th>Name</th><th>Quelle</th><th>Cron</th><th>Aufbewahrung</th><th>Speicherziele</th><th>Letzter Lauf</th><th>Status</th><th></th></tr></thead>
         <tbody id="sched-tbody"></tbody>
       </table>
     </div>
   </div>`);
   const tbody = wrap.querySelector("#sched-tbody");
-  if (!data.schedules.length) tbody.appendChild(h(`<tr><td colspan="7"><div class="empty-state">Keine Zeitpläne konfiguriert</div></td></tr>`));
+  if (!data.schedules.length) tbody.appendChild(h(`<tr><td colspan="8"><div class="empty-state">Keine Zeitpläne konfiguriert</div></td></tr>`));
   data.schedules.forEach((s) => {
+    const targetNames = (s.storage_target_ids || []).map((id) => targetById[id] || `#${id}`);
     const row = h(`<tr>
       <td>${s.name}</td>
       <td>${s.target_type === "container" ? "Container: " + s.target_ref : "Gesamte Landschaft"}</td>
       <td class="mono">${s.cron_expression}</td>
       <td>${s.retention_count > 0 ? s.retention_count + " Versionen" : ""}${s.retention_days > 0 ? " / " + s.retention_days + " Tage" : ""}</td>
+      <td>${targetNames.length ? targetNames.join(", ") : '<span class="muted">nur lokal</span>'}</td>
       <td>${fmtDate(s.last_run_at)}</td>
       <td>${s.last_status ? `<span class="badge ${s.last_status === "ok" ? "ok" : "failed"}">${s.last_status}</span>` : '<span class="badge neutral">nie ausgeführt</span>'}
           ${s.enabled ? "" : '<span class="badge neutral">deaktiviert</span>'}</td>
@@ -510,13 +518,25 @@ async function schedulesPage() {
 
 async function openScheduleModal() {
   let containers = [];
+  let storageTargets = [];
   try { containers = (await api("/api/containers")).containers; } catch (e) {}
+  try { storageTargets = (await api("/api/settings/storage-targets")).targets; } catch (e) {}
+
+  const targetsHtml = storageTargets.length
+    ? storageTargets.map((t) => `
+        <label style="display:flex; align-items:center; gap:8px; padding:6px 0;">
+          <input type="checkbox" class="s-storage-target" value="${t.id}" style="width:auto;" ${t.enabled ? "" : "disabled"} />
+          ${t.name} <span class="muted" style="font-size:.78rem">(${t.type})</span>
+          ${t.enabled ? "" : '<span class="badge neutral">deaktiviert</span>'}
+        </label>`).join("")
+    : `<p class="muted" style="font-size:.85rem">Noch keine Speicherziele konfiguriert. Unter <strong>Einstellungen</strong> anlegen (SMB, S3, Google Drive/OneDrive via rclone, ...).</p>`;
+
   const overlay = h(`
     <div class="modal-overlay">
       <div class="modal">
         <h3>Neuer Zeitplan</h3>
         <div class="field"><label>Name</label><input type="text" id="s-name" /></div>
-        <div class="field"><label>Ziel</label>
+        <div class="field"><label>Sicherungsquelle (was wird gesichert)</label>
           <select id="s-target-type">
             <option value="landscape">Gesamte Docker-Landschaft</option>
             <option value="container">Einzelner Container</option>
@@ -532,6 +552,10 @@ async function openScheduleModal() {
         </div>
         <div class="field"><label>Aufbewahrung: Anzahl Versionen (0 = unbegrenzt)</label><input type="text" id="s-ret-count" value="7" /></div>
         <div class="field"><label>Aufbewahrung: Tage (0 = deaktiviert)</label><input type="text" id="s-ret-days" value="0" /></div>
+        <div class="field">
+          <label>Speicherziele für diesen Zeitplan (wohin zusätzlich hochgeladen wird)</label>
+          <div id="s-storage-targets">${targetsHtml}</div>
+        </div>
         <div class="row-actions">
           <button class="btn" id="cancel-btn">Abbrechen</button>
           <button class="btn primary" id="save-btn">Erstellen</button>
@@ -544,6 +568,7 @@ async function openScheduleModal() {
   });
   overlay.querySelector("#cancel-btn").addEventListener("click", () => overlay.remove());
   overlay.querySelector("#save-btn").addEventListener("click", async () => {
+    const storageTargetIds = Array.from(overlay.querySelectorAll(".s-storage-target:checked")).map((el) => parseInt(el.value, 10));
     const payload = {
       name: overlay.querySelector("#s-name").value.trim() || "Backup",
       target_type: overlay.querySelector("#s-target-type").value,
@@ -551,6 +576,7 @@ async function openScheduleModal() {
       cron_expression: overlay.querySelector("#s-cron").value.trim(),
       retention_count: parseInt(overlay.querySelector("#s-ret-count").value || "0", 10),
       retention_days: parseInt(overlay.querySelector("#s-ret-days").value || "0", 10),
+      storage_target_ids: storageTargetIds,
       enabled: true,
     };
     try {
@@ -572,6 +598,15 @@ async function settingsPage() {
 
     <div class="section-title">Speicherort</div>
     <div class="card mono">${overview.backups_dir}</div>
+
+    <div class="section-title">Verschlüsselung</div>
+    <div class="card">
+      ${overview.encryption_enabled
+        ? `<span class="badge ok">🔒 Aktiv</span> <span class="muted">Backups werden mit AES-256 verschlüsselt abgelegt (Schlüssel aus <span class="mono">DBM_ENCRYPTION_KEY</span>).</span>`
+        : `<span class="badge failed">⚠️ Inaktiv</span> <span class="muted">Backups werden unverschlüsselt gespeichert. Setze die Umgebungsvariable
+           <span class="mono">DBM_ENCRYPTION_KEY</span> (z. B. <span class="mono">openssl rand -base64 32</span>) und starte den Container neu.
+           Wichtig: Schlüssel sicher aufbewahren – ohne ihn sind bestehende Backups nicht wiederherstellbar.</span>`}
+    </div>
 
     <div class="section-title">Passwort ändern</div>
     <div class="card">
@@ -604,7 +639,12 @@ async function settingsPage() {
   });
 
   const tbody = wrap.querySelector("#targets-tbody");
-  const typeLabels = { local_path: "SMB/NFS-Pfad (lokal gemountet)", s3: "S3-kompatibel", rclone: "rclone (Google Drive, OneDrive, ...)" };
+  const typeLabels = {
+    local_path: "SMB/NFS-Pfad (lokal gemountet)",
+    smb: "SMB/CIFS (Benutzername/Passwort)",
+    s3: "S3-kompatibel",
+    rclone: "rclone (Google Drive, OneDrive, ...)",
+  };
   if (!targetsData.targets.length) tbody.appendChild(h(`<tr><td colspan="5"><div class="empty-state">Keine externen Ziele konfiguriert</div></td></tr>`));
   targetsData.targets.forEach((t) => {
     const row = h(`<tr>
@@ -640,7 +680,8 @@ function openStorageTargetModal() {
         <div class="field"><label>Name</label><input type="text" id="t-name" /></div>
         <div class="field"><label>Typ</label>
           <select id="t-type">
-            <option value="local_path">SMB/NFS-Pfad (im Container gemountet)</option>
+            <option value="smb">SMB/CIFS (Server + Benutzername/Passwort)</option>
+            <option value="local_path">Bereits gemounteter Pfad (SMB/NFS am Host)</option>
             <option value="s3">S3-kompatibel (AWS S3, MinIO, Wasabi, ...)</option>
             <option value="rclone">rclone-Remote (Google Drive, OneDrive, SFTP, ...)</option>
           </select>
@@ -655,7 +696,16 @@ function openStorageTargetModal() {
   `);
   const fieldsEl = overlay.querySelector("#t-config-fields");
   function renderFields(type) {
-    if (type === "local_path") {
+    if (type === "smb") {
+      fieldsEl.innerHTML = `
+        <div class="field"><label>Server (IP oder Hostname)</label><input type="text" id="cfg-server" placeholder="192.168.1.50" /></div>
+        <div class="field"><label>Freigabename (Share)</label><input type="text" id="cfg-share" placeholder="backups" /></div>
+        <div class="field"><label>Unterordner (optional)</label><input type="text" id="cfg-base-path" placeholder="docker-backup-manager" /></div>
+        <div class="field"><label>Benutzername</label><input type="text" id="cfg-username" /></div>
+        <div class="field"><label>Passwort</label><input type="password" id="cfg-password" /></div>
+        <div class="field"><label>Domain (optional)</label><input type="text" id="cfg-domain" /></div>
+        <div class="field"><label>Port</label><input type="text" id="cfg-port" value="445" /></div>`;
+    } else if (type === "local_path") {
       fieldsEl.innerHTML = `
         <div class="field"><label>Pfad im Container (z.B. gemountete SMB/NFS-Freigabe)</label>
           <input type="text" id="cfg-path" placeholder="/mnt/remote-backup" /></div>`;
@@ -674,14 +724,23 @@ function openStorageTargetModal() {
         <p class="muted" style="font-size:.8rem">Der Remote muss vorher per <span class="mono">rclone config</span> in der gemounteten rclone.conf eingerichtet sein (unterstützt Google Drive, OneDrive, SFTP, WebDAV, u.v.m.).</p>`;
     }
   }
-  renderFields("local_path");
+  renderFields("smb");
   overlay.querySelector("#t-type").addEventListener("change", (e) => renderFields(e.target.value));
 
   overlay.querySelector("#cancel-btn").addEventListener("click", () => overlay.remove());
   overlay.querySelector("#save-btn").addEventListener("click", async () => {
     const type = overlay.querySelector("#t-type").value;
     let config = {};
-    if (type === "local_path") config = { path: overlay.querySelector("#cfg-path").value.trim() };
+    if (type === "smb") config = {
+      server: overlay.querySelector("#cfg-server").value.trim(),
+      share: overlay.querySelector("#cfg-share").value.trim(),
+      base_path: overlay.querySelector("#cfg-base-path").value.trim(),
+      username: overlay.querySelector("#cfg-username").value.trim(),
+      password: overlay.querySelector("#cfg-password").value,
+      domain: overlay.querySelector("#cfg-domain").value.trim(),
+      port: overlay.querySelector("#cfg-port").value.trim() || "445",
+    };
+    else if (type === "local_path") config = { path: overlay.querySelector("#cfg-path").value.trim() };
     else if (type === "s3") config = {
       bucket: overlay.querySelector("#cfg-bucket").value.trim(),
       endpoint_url: overlay.querySelector("#cfg-endpoint").value.trim(),
@@ -713,6 +772,7 @@ async function boot() {
     if (!me) { render(loginScreen()); return; }
     state.user = me;
     await navigate("dashboard");
+    startGlobalJobPoller();
   } catch (e) {
     render(loginScreen());
   }

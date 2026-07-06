@@ -9,6 +9,10 @@ services:
     environment:
       # Change this in production - it signs session cookies.
       DBM_SECRET_KEY: "please-change-this-to-a-long-random-string"
+      # Optional but recommended: encrypts backups at rest (AES-256). Generate
+      # with `openssl rand -base64 32` and keep it safe - losing it makes
+      # existing backups permanently unrecoverable.
+      # DBM_ENCRYPTION_KEY: ""
     volumes:
       # Docker Engine API socket - required to inspect/backup/restore containers.
       - /var/run/docker.sock:/var/run/docker.sock

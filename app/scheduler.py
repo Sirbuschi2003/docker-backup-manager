@@ -56,7 +56,8 @@ def run_schedule(schedule_id: int):
                 def upload_progress(label, idx, total):
                     progress(1, label, 1)
 
-                storage_sync.sync_to_all_targets(result.path, on_progress=upload_progress)
+                target_ids = json.loads(sched.storage_target_ids or "[]")
+                storage_sync.sync_to_selected_targets(result.path, target_ids, on_progress=upload_progress)
 
             job_tracker.finish_job(job.id, result.ok, result.error, record.id)
 

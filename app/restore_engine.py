@@ -17,6 +17,7 @@ import json
 from pathlib import Path
 from typing import Callable, Optional
 
+from app import encryption
 from app.backup_engine import ProgressCallback, _noop_progress, restore_volume_from_file
 from app.docker_client import get_client
 
@@ -77,8 +78,17 @@ def _build_create_kwargs(container_json: dict, new_name: Optional[str], image_re
 
 def restore_container(backup_dir: Path, new_name: Optional[str] = None, start: bool = True,
                        on_progress: ProgressCallback = _noop_progress):
-    client = get_client()
     backup_dir = Path(backup_dir)
+    if encryption.is_backup_encrypted(backup_dir):
+        on_progress(0, "Decrypting backup", 1)
+        with encryption.decrypt_directory_to_temp(backup_dir) as tmp_dir:
+            return _restore_from_plaintext_dir(Path(tmp_dir), new_name, start, on_progress)
+    return _restore_from_plaintext_dir(backup_dir, new_name, start, on_progress)
+
+
+def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start: bool,
+                                 on_progress: ProgressCallback):
+    client = get_client()
 
     container_json = json.loads((backup_dir / "container.json").read_text())
     networks_json = {}

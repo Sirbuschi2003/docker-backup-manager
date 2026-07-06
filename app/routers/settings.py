@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app import storage_sync
+from app import encryption, storage_sync
 from app.auth import get_current_user
 from app.config import BACKUPS_DIR, DEFAULT_RETENTION_COUNT, DEFAULT_RETENTION_DAYS
 from app.database import get_db
@@ -27,6 +27,7 @@ def overview(user: User = Depends(get_current_user)):
         "docker_error": docker_error,
         "default_retention_count": DEFAULT_RETENTION_COUNT,
         "default_retention_days": DEFAULT_RETENTION_DAYS,
+        "encryption_enabled": encryption.is_enabled(),
     }
 
 
@@ -52,7 +53,7 @@ def list_targets(db: Session = Depends(get_db), user: User = Depends(get_current
 @router.post("/storage-targets")
 def create_target(payload: StorageTargetPayload, db: Session = Depends(get_db),
                    user: User = Depends(get_current_user)):
-    if payload.type not in ("local_path", "s3", "rclone"):
+    if payload.type not in ("local_path", "smb", "s3", "rclone"):
         raise HTTPException(400, "Invalid target type")
     target = StorageTarget(
         name=payload.name, type=payload.type, config_json=json.dumps(payload.config), enabled=payload.enabled,

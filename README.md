@@ -22,12 +22,18 @@ purem Docker Engine auf Linux.
   nichts wird überschrieben
 - **Zeitpläne** (Cron) pro Container oder für die gesamte Landschaft, inkl.
   automatischer **Aufbewahrungsrichtlinie** (Anzahl Versionen und/oder Alter in Tagen)
+  und pro Zeitplan frei wählbaren **Speicherzielen** (z. B. ein Zeitplan nach
+  Google Drive, ein anderer nach SMB, ein dritter nur lokal)
 - **Löschen** einzelner Backup-Versionen
+- **Verschlüsselung at rest**: Backups werden optional mit AES-256 verschlüsselt
+  auf der Platte abgelegt (Schlüssel nur per Umgebungsvariable, nie in der DB)
 - **Fortschrittsanzeige** (Ladebalken + geschätzte Restzeit) bei laufenden
-  Backup-/Restore-Jobs
-- **Externe Speicherziele** für Offsite-Kopien: SMB/NFS (als gemounteter Pfad),
-  S3-kompatibel (AWS S3, MinIO, Wasabi, ...) nativ, sowie über das mitgelieferte
-  `rclone` **Google Drive, OneDrive** und viele weitere Backends
+  Backup-/Restore-Jobs, sichtbar auf jeder Seite der App
+- **Externe Speicherziele** für Offsite-Kopien: echtes **SMB/CIFS** mit
+  Benutzername/Passwort (kein Host-Mount nötig), ein bereits gemounteter
+  SMB/NFS-Pfad, S3-kompatibel (AWS S3, MinIO, Wasabi, ...) nativ, sowie über
+  das mitgelieferte `rclone` **Google Drive, OneDrive, Dropbox, Box, pCloud,
+  Mega, SFTP, WebDAV** und viele weitere Cloud-Anbieter
 - Modernes, responsives Web-UI (hell/dunkel), Login-geschützt
 
 ## Architektur
@@ -205,22 +211,33 @@ da die Backup/Restore-Funktionen die Docker-API benötigen.
 3. Unter **Backups** siehst du alle Versionen je Container/Landschaft,
    kannst wiederherstellen, herunterladen (Dateisystem) oder löschen.
 4. Unter **Zeitpläne** legst du Cron-Zeitpläne mit Aufbewahrungsrichtlinie an
-   (z. B. täglich 03:00 Uhr, letzte 7 Versionen behalten).
-5. Unter **Einstellungen** kannst du zusätzliche Speicherziele für Offsite-Kopien
-   konfigurieren:
-   - **SMB/NFS**: Freigabe auf dem NAS/Host mounten und den Mount-Pfad im
-     Container per `docker-compose.yml`-Volume verfügbar machen (siehe
-     auskommentierte Zeile in `docker-compose.yml`), dann diesen Pfad als
-     „SMB/NFS-Pfad" Ziel eintragen.
+   (z. B. täglich 03:00 Uhr, letzte 7 Versionen behalten) **und wählst dort
+   explizit aus, an welche(s) Speicherziel(e) dieser Zeitplan hochladen soll**
+   (Checkboxen im Zeitplan-Dialog — leer lassen für „nur lokal“). So kannst du
+   z. B. einen Zeitplan nach Google Drive und einen anderen nach SMB laufen
+   lassen.
+5. Unter **Einstellungen** kannst du Speicherziele für Offsite-Kopien anlegen:
+   - **SMB/CIFS (empfohlen für Windows-Freigaben/NAS)**: Server, Freigabename,
+     Benutzername + Passwort direkt in der App eintragen — kein Host-Mount,
+     kein privilegierter Container nötig. Das ist die Option für „echte“
+     Zugangsdaten.
+   - **Bereits gemounteter Pfad (SMB/NFS am Host)**: Alternative, falls die
+     Freigabe schon auf Host-Ebene gemountet ist (Synology/QNAP/UGREEN
+     Freigabenverwaltung oder `/etc/fstab` unter Ubuntu) und nur als Ordner
+     per `docker-compose.yml`-Volume in den Container durchgereicht wird
+     (siehe auskommentierte Zeile in `docker-compose.yml`).
    - **S3**: Bucket, Endpoint (leer lassen für AWS S3), Access/Secret Key
      eintragen.
-   - **Google Drive / OneDrive / sonstige**: einmalig per `rclone config`
-     (z. B. lokal `rclone config` ausführen, die erzeugte `rclone.conf` als
-     Volume `./rclone.conf:/data/rclone.conf:ro` einbinden), danach im UI
-     den Remote-Namen + Zielpfad eintragen.
+   - **rclone (Google Drive, OneDrive, Dropbox, Box, pCloud, Mega, SFTP,
+     WebDAV, ...)**: einmalig per `rclone config` (z. B. lokal `rclone config`
+     ausführen), die erzeugte `rclone.conf` als Volume
+     `./rclone.conf:/data/rclone.conf:ro` einbinden, danach im UI den
+     Remote-Namen + Zielpfad eintragen.
 
-Nach jedem erfolgreichen Backup werden alle aktivierten Speicherziele
-automatisch synchronisiert — der Fortschritt erscheint mit im Dashboard.
+Bei manuell ausgelösten Backups („Backup jetzt“, „Gesamte Landschaft sichern“)
+werden alle aktivierten Speicherziele synchronisiert; bei Zeitplänen nur die
+dort ausgewählten. Der Fortschritt aller laufenden Backup-/Restore-/Sync-Jobs
+erscheint als Ladebalken unten links auf jeder Seite der App.
 
 ## Wiederherstellung auf einem anderen System
 
@@ -237,7 +254,30 @@ Hinweis: Die Wiederherstellung deckt die gängigen Container-Einstellungen ab
 (Umgebungsvariablen, Ports, Volumes/Binds, Restart-Policy, Netzwerke,
 Capabilities, Privileged-Mode). Sehr exotische Host-Konfigurationen (z. B.
 komplexe Device-Mappings) müssen ggf. nach der Wiederherstellung manuell
-nachjustiert werden.
+nachjustiert werden. Ist ein Backup verschlüsselt (siehe unten), entschlüsselt
+die App es beim Wiederherstellen automatisch in ein temporäres Verzeichnis —
+auf der Platte bleibt immer nur die verschlüsselte Version liegen.
+
+## Verschlüsselung
+
+Backups können optional mit **AES-256 (CBC) + HMAC-SHA256** verschlüsselt
+auf der Platte abgelegt werden (encrypt-then-MAC, gestreamt in Blöcken, damit
+auch mehrere Gigabyte große Volume-Archive nicht komplett in den Arbeitsspeicher
+geladen werden müssen).
+
+1. Schlüssel erzeugen: `openssl rand -base64 32` (oder
+   `python -c "import secrets,base64;print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"`).
+2. Als Umgebungsvariable `DBM_ENCRYPTION_KEY` setzen (in der `docker-compose.yml`
+   oder in Portainer unter „Environment variables“) und den Container neu starten.
+3. Ab dann werden **alle neuen** Backups automatisch verschlüsselt — sichtbar
+   unter Einstellungen als „🔒 Aktiv“. Bereits vorhandene, unverschlüsselte
+   Backups bleiben unverschlüsselt, bis sie erneut gesichert werden.
+
+**Wichtig:** Der Schlüssel wird ausschließlich aus der Umgebungsvariable gelesen,
+nie in der Datenbank gespeichert. Das bedeutet auch: **Geht der Schlüssel
+verloren, sind die damit verschlüsselten Backups unwiderruflich nicht mehr
+entschlüsselbar.** Schlüssel getrennt vom Backup-Speicher sichern (z. B. in
+einem Passwort-Manager)!
 
 ## Sicherheit
 
@@ -245,6 +285,8 @@ nachjustiert werden.
   bcrypt-gehashte Passwörter)
 - `DBM_SECRET_KEY` in der `docker-compose.yml` **unbedingt** vor dem
   Produktivbetrieb auf einen langen, zufälligen Wert ändern
+- `DBM_ENCRYPTION_KEY` setzen, um Backups at-rest zu verschlüsseln (siehe oben)
+  — besonders relevant, wenn Backups auf externe Speicherziele hochgeladen werden
 - Der Container benötigt Zugriff auf den Docker-Socket — das entspricht
   faktisch Root-Rechten auf dem Host. Nur auf vertrauenswürdigen Hosts
   betreiben und die Web-UI nicht ungeschützt ins Internet stellen (ggf.
