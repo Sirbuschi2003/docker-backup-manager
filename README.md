@@ -122,31 +122,47 @@ Zwei Wege, das Tool darüber zu deployen:
 
 **b) Per Copy-Paste (Web-Editor), ohne Repository-Zugriff:**
 
+Der Web-Editor kann keinen lokalen Build-Kontext (`build: .`) hochladen —
+dafür wird bei jedem Push auf `master` automatisch ein fertiges Image per
+GitHub Actions nach GHCR gebaut (`.github/workflows/docker-publish.yml`),
+das hier direkt referenziert werden kann.
+
 1. **Stacks → Add stack**, Build method: **Web editor**.
-2. Inhalt der `docker-compose.yml` aus diesem Repo hineinkopieren; dabei
-   `build: .` durch ein vorgebautes Image ersetzen, z. B.:
-   ```yaml
-   services:
-     docker-backup-manager:
-       image: ghcr.io/sirbuschi2003/docker-backup-manager:latest
-       container_name: docker-backup-manager
-       restart: unless-stopped
-       ports:
-         - "8420:8420"
-       environment:
-         DBM_SECRET_KEY: "please-change-this-to-a-long-random-string"
-       volumes:
-         - /var/run/docker.sock:/var/run/docker.sock
-         - dbm_data:/data
-   volumes:
-     dbm_data:
-   ```
-   (Ein solches vorgebautes Image existiert nur, wenn du es selbst per
-   `docker build` + `docker push` in eine Registry legst — alternativ bei
-   „Web editor" einfach `build: .` lassen und den Projektordner stattdessen
-   per **Repository**-Methode wie unter a) deployen, da der Web-Editor keinen
-   lokalen Build-Kontext hochladen kann.)
-3. **Deploy the stack** klicken.
+2. Folgenden Inhalt einfügen (nicht in eine Markdown-Liste eingerückt kopieren,
+   sonst können führende Leerzeichen die YAML-Einrückung durcheinanderbringen):
+
+```yaml
+services:
+  docker-backup-manager:
+    image: ghcr.io/sirbuschi2003/docker-backup-manager:latest
+    container_name: docker-backup-manager
+    restart: unless-stopped
+    ports:
+      - "8420:8420"
+    environment:
+      DBM_SECRET_KEY: "please-change-this-to-a-long-random-string"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - dbm_data:/data
+volumes:
+  dbm_data:
+```
+
+3. Da das Repository **privat** ist, ist das gebaute Package auf GHCR
+   standardmäßig ebenfalls privat. Entweder:
+   - auf GitHub unter **Packages → docker-backup-manager → Package settings →
+     Change visibility → Public** stellen, oder
+   - in Portainer unter **Registries** eine GHCR-Registry mit einem GitHub
+     Personal Access Token (Scope `read:packages`) hinterlegen und beim
+     Stack-Deploy diese Registry auswählen.
+4. **Deploy the stack** klicken.
+
+Falls du stattdessen selbst bauen möchtest (z. B. eigener Image-Name/Tag):
+
+```bash
+docker build -t ghcr.io/<dein-user>/docker-backup-manager:latest .
+docker push ghcr.io/<dein-user>/docker-backup-manager:latest
+```
 
 In beiden Fällen: Docker-Socket-Mount und persistentes `/data`-Volume nicht
 vergessen, sonst gehen Backups/Zeitpläne bei einem Container-Neustart verloren.
