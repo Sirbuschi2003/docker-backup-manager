@@ -102,7 +102,57 @@ Danach: `http://<server-ip>:8420` öffnen und Admin-Konto anlegen.
 3. Docker-Socket-Mount beibehalten (Standard bei allen genannten NAS-Systemen).
 4. Projekt starten, Port 8420 aufrufen.
 
-### 5. Windows (Docker Desktop) — z. B. zum Testen
+### 5. Portainer (Stacks) — funktioniert auf jedem Docker-Host inkl. NAS
+
+Portainer läuft selbst oft auf genau den NAS-Systemen oben (oder auf einem
+separaten Docker-Host) und bietet eine eigene Oberfläche für Compose-Stacks.
+Zwei Wege, das Tool darüber zu deployen:
+
+**a) Über Git-Repository (empfohlen, ermöglicht spätere „Pull & Redeploy"):**
+
+1. **Stacks → Add stack**.
+2. Name vergeben, z. B. `docker-backup-manager`.
+3. Build method: **Repository** wählen.
+4. Repository-URL: `https://github.com/Sirbuschi2003/docker-backup-manager`
+   (bei privatem Repo zusätzlich einen GitHub Personal Access Token unter
+   „Authentication" hinterlegen).
+5. Compose path: `docker-compose.yml` (Standard).
+6. Unter **Environment variables** optional `DBM_SECRET_KEY` setzen.
+7. **Deploy the stack** klicken.
+
+**b) Per Copy-Paste (Web-Editor), ohne Repository-Zugriff:**
+
+1. **Stacks → Add stack**, Build method: **Web editor**.
+2. Inhalt der `docker-compose.yml` aus diesem Repo hineinkopieren; dabei
+   `build: .` durch ein vorgebautes Image ersetzen, z. B.:
+   ```yaml
+   services:
+     docker-backup-manager:
+       image: ghcr.io/sirbuschi2003/docker-backup-manager:latest
+       container_name: docker-backup-manager
+       restart: unless-stopped
+       ports:
+         - "8420:8420"
+       environment:
+         DBM_SECRET_KEY: "please-change-this-to-a-long-random-string"
+       volumes:
+         - /var/run/docker.sock:/var/run/docker.sock
+         - dbm_data:/data
+   volumes:
+     dbm_data:
+   ```
+   (Ein solches vorgebautes Image existiert nur, wenn du es selbst per
+   `docker build` + `docker push` in eine Registry legst — alternativ bei
+   „Web editor" einfach `build: .` lassen und den Projektordner stattdessen
+   per **Repository**-Methode wie unter a) deployen, da der Web-Editor keinen
+   lokalen Build-Kontext hochladen kann.)
+3. **Deploy the stack** klicken.
+
+In beiden Fällen: Docker-Socket-Mount und persistentes `/data`-Volume nicht
+vergessen, sonst gehen Backups/Zeitpläne bei einem Container-Neustart verloren.
+Danach `http://<host-ip>:8420` öffnen.
+
+### 6. Windows (Docker Desktop) — z. B. zum Testen
 
 ```powershell
 git clone https://github.com/sirbuschi2003/docker-backup-manager.git
