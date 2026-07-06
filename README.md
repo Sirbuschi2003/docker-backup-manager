@@ -116,6 +116,9 @@ Zwei Wege, das Tool darüber zu deployen:
 4. Repository-URL: `https://github.com/Sirbuschi2003/docker-backup-manager`
    (bei privatem Repo zusätzlich einen GitHub Personal Access Token unter
    „Authentication" hinterlegen).
+   **Wichtig:** Der Default-Branch dieses Repos heißt `master`, nicht `main`.
+   Unter „Repository reference" explizit `refs/heads/master` eintragen —
+   sonst bricht Portainer mit `reference not found` ab.
 5. Compose path: `docker-compose.yml` (Standard).
 6. Unter **Environment variables** optional `DBM_SECRET_KEY` setzen.
 7. **Deploy the stack** klicken.
