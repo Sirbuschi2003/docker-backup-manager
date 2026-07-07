@@ -26,11 +26,12 @@ Supported target types:
 """
 from __future__ import annotations
 
+import datetime
 import json
 import logging
 import shutil
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Optional
 
 from app.config import BACKUPS_DIR
@@ -477,7 +478,6 @@ def _sync_to_targets(backup_path: Path, target_ids: Optional[list[int]], on_prog
     successful) local backup look failed."""
     from app.database import SessionLocal
     from app.models import StorageTarget
-    import datetime
 
     db = SessionLocal()
     results = []
@@ -548,3 +548,268 @@ def check_target_connection(target_type: str, config_json: str) -> None:
         oauth_storage.check_onedrive_connection(config)
     else:
         raise ValueError(f"Unknown storage target type: {target_type}")
+
+
+# ---------- Catalog import: discover + pull back backups that already exist
+# on a target (e.g. a fresh install pointed at an old NAS/S3 bucket/rclone
+# remote after a full host loss) ----------
+
+def _dir_size(path: Path) -> int:
+    return sum(f.stat().st_size for f in Path(path).rglob("*") if f.is_file())
+
+
+def _parse_backup_relative_dir(rel: PurePosixPath) -> Optional[dict]:
+    """A backup version directory is always either <name>/<timestamp> (single
+    container) or _landscapes/<name>/<timestamp> (landscape/project). Anything
+    else found under a target isn't a backup this app made."""
+    parts = rel.parts
+    if len(parts) == 3 and parts[0] == "_landscapes":
+        name, ts = parts[1], parts[2]
+        backup_type = "landscape"
+    elif len(parts) == 2:
+        name, ts = parts
+        backup_type = "container"
+    else:
+        return None
+    try:
+        created_at = datetime.datetime.strptime(ts, "%Y%m%dT%H%M%SZ")
+    except ValueError:
+        return None
+    return {"relative_key": "/".join(parts), "name": name, "backup_type": backup_type, "created_at": created_at}
+
+
+_META_FILENAMES = ("meta.json", "meta.json.enc")
+
+
+def _list_backups_local_path(config: dict) -> list[dict]:
+    root = Path(config["path"])
+    if not root.exists():
+        return []
+    entries = []
+    seen = set()
+    for meta_filename in _META_FILENAMES:
+        for meta_path in root.rglob(meta_filename):
+            rel = meta_path.parent.relative_to(root)
+            if rel in seen:
+                continue
+            seen.add(rel)
+            parsed = _parse_backup_relative_dir(PurePosixPath(rel.as_posix()))
+            if parsed:
+                parsed["size_bytes"] = _dir_size(meta_path.parent)
+                entries.append(parsed)
+    return entries
+
+
+def _list_backups_s3(config: dict) -> list[dict]:
+    import boto3
+
+    session = boto3.session.Session(
+        aws_access_key_id=config["access_key"],
+        aws_secret_access_key=config["secret_key"],
+        region_name=config.get("region") or None,
+    )
+    s3 = session.client("s3", endpoint_url=config.get("endpoint_url") or None)
+    bucket = config["bucket"]
+    prefix = config.get("prefix", "").strip("/")
+    list_prefix = prefix + "/" if prefix else ""
+
+    sizes_by_key: dict[str, int] = {}
+    has_meta: set[str] = set()
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=list_prefix):
+        for obj in page.get("Contents", []):
+            rel = obj["Key"][len(list_prefix):] if list_prefix else obj["Key"]
+            parts = PurePosixPath(rel).parts
+            if parts and parts[0] == "_landscapes" and len(parts) >= 4:
+                backup_rel = "/".join(parts[:3])
+            elif len(parts) >= 2:
+                backup_rel = "/".join(parts[:2])
+            else:
+                continue
+            sizes_by_key[backup_rel] = sizes_by_key.get(backup_rel, 0) + obj["Size"]
+            if parts[-1] in _META_FILENAMES:
+                has_meta.add(backup_rel)
+
+    entries = []
+    for backup_rel in has_meta:
+        parsed = _parse_backup_relative_dir(PurePosixPath(backup_rel))
+        if parsed:
+            parsed["size_bytes"] = sizes_by_key.get(backup_rel, 0)
+            entries.append(parsed)
+    return entries
+
+
+def _list_backups_smb(config: dict) -> list[dict]:
+    import smbclient
+
+    _smb_register_session(config)
+    root = _smb_remote_root(config, "")
+    if not smbclient.path.exists(root):
+        return []
+
+    sizes_by_key: dict[str, int] = {}
+    has_meta: set[str] = set()
+    for dirpath, _dirnames, filenames in smbclient.walk(root):
+        rel_dir = dirpath[len(root):].strip("\\") if dirpath.startswith(root) else dirpath
+        for filename in filenames:
+            rel = f"{rel_dir}\\{filename}" if rel_dir else filename
+            parts = tuple(p for p in rel.replace("\\", "/").split("/") if p)
+            if len(parts) >= 4 and parts[0] == "_landscapes":
+                backup_rel = "/".join(parts[:3])
+            elif len(parts) >= 2:
+                backup_rel = "/".join(parts[:2])
+            else:
+                continue
+            try:
+                size = smbclient.stat(f"{dirpath}\\{filename}").st_size
+            except Exception:  # noqa: BLE001
+                size = 0
+            sizes_by_key[backup_rel] = sizes_by_key.get(backup_rel, 0) + size
+            if filename in _META_FILENAMES:
+                has_meta.add(backup_rel)
+
+    entries = []
+    for backup_rel in has_meta:
+        parsed = _parse_backup_relative_dir(PurePosixPath(backup_rel))
+        if parsed:
+            parsed["size_bytes"] = sizes_by_key.get(backup_rel, 0)
+            entries.append(parsed)
+    return entries
+
+
+def _list_backups_rclone(config: dict) -> list[dict]:
+    remote = config["remote"]
+    remote_path = config.get("remote_path", "").strip("/")
+    src = f"{remote}:{remote_path}".rstrip(":") if not remote_path else f"{remote}:{remote_path}"
+    proc = subprocess.run(
+        ["rclone", "lsjson", src, "-R", "--files-only", "--config", RCLONE_CONFIG_PATH],
+        capture_output=True, text=True, timeout=300,
+    )
+    if proc.returncode != 0:
+        if "directory not found" in (proc.stderr or "").lower():
+            return []
+        raise RuntimeError(f"rclone lsjson failed: {proc.stderr.strip() or proc.stdout.strip()}")
+
+    sizes_by_key: dict[str, int] = {}
+    has_meta: set[str] = set()
+    for item in json.loads(proc.stdout or "[]"):
+        parts = PurePosixPath(item["Path"]).parts
+        if parts and parts[0] == "_landscapes" and len(parts) >= 4:
+            backup_rel = "/".join(parts[:3])
+        elif len(parts) >= 2:
+            backup_rel = "/".join(parts[:2])
+        else:
+            continue
+        sizes_by_key[backup_rel] = sizes_by_key.get(backup_rel, 0) + item.get("Size", 0)
+        if parts[-1] in _META_FILENAMES:
+            has_meta.add(backup_rel)
+
+    entries = []
+    for backup_rel in has_meta:
+        parsed = _parse_backup_relative_dir(PurePosixPath(backup_rel))
+        if parsed:
+            parsed["size_bytes"] = sizes_by_key.get(backup_rel, 0)
+            entries.append(parsed)
+    return entries
+
+
+LIST_BACKUPS_HANDLERS = {
+    "local_path": _list_backups_local_path,
+    "smb": _list_backups_smb,
+    "s3": _list_backups_s3,
+    "rclone": _list_backups_rclone,
+}
+
+
+def list_backups_on_target(target_type: str, config_json: str) -> list[dict]:
+    """Scans a storage target for existing backup versions (recognized by a
+    meta.json/meta.json.enc marker file), so a fresh install can rebuild its
+    local catalog from a target that already holds real backups - e.g. after
+    a full host loss where only the offsite copy survived. Not supported for
+    google_drive/onedrive (no cheap recursive listing API for either without
+    a lot more code); use one of the other target types for this workflow."""
+    handler = LIST_BACKUPS_HANDLERS.get(target_type)
+    if not handler:
+        raise ValueError(
+            f"Katalog-Import wird für Zieltyp '{target_type}' nicht unterstützt "
+            "(nur lokaler Pfad, SMB, S3 und rclone)."
+        )
+    config = json.loads(config_json or "{}")
+    return handler(config)
+
+
+def _download_full_local_path(config: dict, relative_key: str, dest_dir: Path) -> None:
+    src = Path(config["path"]) / relative_key
+    if dest_dir.exists():
+        shutil.rmtree(dest_dir)
+    shutil.copytree(src, dest_dir)
+
+
+def _download_full_s3(config: dict, relative_key: str, dest_dir: Path) -> None:
+    import boto3
+
+    session = boto3.session.Session(
+        aws_access_key_id=config["access_key"],
+        aws_secret_access_key=config["secret_key"],
+        region_name=config.get("region") or None,
+    )
+    s3 = session.client("s3", endpoint_url=config.get("endpoint_url") or None)
+    bucket = config["bucket"]
+    prefix = "/".join(filter(None, [config.get("prefix", "").strip("/"), relative_key]))
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            rel = obj["Key"][len(prefix):].lstrip("/")
+            if not rel:
+                continue
+            dest_file = dest_dir / rel
+            dest_file.parent.mkdir(parents=True, exist_ok=True)
+            s3.download_file(bucket, obj["Key"], str(dest_file))
+
+
+def _download_full_smb(config: dict, relative_key: str, dest_dir: Path) -> None:
+    import smbclient
+
+    _smb_register_session(config)
+    remote_root = _smb_remote_root(config, relative_key)
+    for dirpath, _dirnames, filenames in smbclient.walk(remote_root):
+        rel_dir = dirpath[len(remote_root):].strip("\\") if dirpath.startswith(remote_root) else ""
+        for filename in filenames:
+            remote_file = f"{dirpath}\\{filename}"
+            dest_file = (dest_dir / rel_dir / filename) if rel_dir else (dest_dir / filename)
+            dest_file.parent.mkdir(parents=True, exist_ok=True)
+            with smbclient.open_file(remote_file, mode="rb") as src, open(dest_file, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+
+
+def _download_full_rclone(config: dict, relative_key: str, dest_dir: Path) -> None:
+    remote = config["remote"]
+    remote_path = config.get("remote_path", "").strip("/")
+    src = f"{remote}:{remote_path}/{relative_key}".replace("\\", "/")
+    proc = subprocess.run(
+        ["rclone", "copy", src, str(dest_dir), "--config", RCLONE_CONFIG_PATH],
+        capture_output=True, text=True, timeout=3600,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"rclone copy failed: {proc.stderr.strip() or proc.stdout.strip()}")
+
+
+DOWNLOAD_FULL_HANDLERS = {
+    "local_path": _download_full_local_path,
+    "smb": _download_full_smb,
+    "s3": _download_full_s3,
+    "rclone": _download_full_rclone,
+}
+
+
+def download_full_backup_from_target(target_type: str, config_json: str, relative_key: str, dest_dir: Path) -> None:
+    """Downloads every file under relative_key on a target into dest_dir,
+    reconstructing the backup's normal local directory layout - used to
+    materialize a backup version that a fresh install only knows about via
+    list_backups_on_target(), before it can be restored."""
+    handler = DOWNLOAD_FULL_HANDLERS.get(target_type)
+    if not handler:
+        raise ValueError(f"Download wird für Zieltyp '{target_type}' nicht unterstützt.")
+    config = json.loads(config_json or "{}")
+    dest_dir.parent.mkdir(parents=True, exist_ok=True)
+    handler(config, relative_key, dest_dir)

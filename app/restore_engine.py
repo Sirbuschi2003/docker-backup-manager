@@ -86,6 +86,22 @@ def restore_container(backup_dir: Path, new_name: Optional[str] = None, start: b
     # computed from the original (possibly encrypted) directory, since a
     # decrypted copy lives under a throwaway temp path with no such relation.
     relative_key = storage_sync._relative_key(backup_dir)
+
+    if not backup_dir.exists():
+        # Either a catalog entry imported from a target (see
+        # list_backups_on_target) that was never local at all, or local files
+        # got lost some other way - pull the whole thing back from the target
+        # first so everything below can work exactly like a normal local backup.
+        if not stream_target:
+            raise RuntimeError(
+                "Dieses Backup existiert lokal nicht (z. B. nach einem Katalog-Import von einem "
+                "Speicherziel) und es wurde kein Speicherziel zum Nachladen angegeben - "
+                "Wiederherstellung nicht möglich."
+            )
+        on_progress(0, "Lade Backup vom Speicherziel herunter", 1)
+        target_type, target_config_json, _target_id = stream_target
+        storage_sync.download_full_backup_from_target(target_type, target_config_json, relative_key, backup_dir)
+
     if encryption.is_backup_encrypted(backup_dir):
         on_progress(0, "Decrypting backup", 1)
         with encryption.decrypt_directory_to_temp(backup_dir) as tmp_dir:

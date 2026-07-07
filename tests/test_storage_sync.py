@@ -6,7 +6,7 @@ import pytest
 from app.config import BACKUPS_DIR
 from app.storage_sync import (
     _relative_key, check_target_connection, delete_from_target, download_from_target,
-    stream_upload_to_target, sync_local_path,
+    download_full_backup_from_target, list_backups_on_target, stream_upload_to_target, sync_local_path,
 )
 
 
@@ -94,3 +94,68 @@ def test_download_from_target_local_path_roundtrip(tmp_path: Path):
 def test_download_from_target_rejects_unsupported_type(tmp_path: Path):
     with pytest.raises(ValueError):
         download_from_target("onedrive", "{}", "app/v1/volumes/data.tar.gz", tmp_path / "out.tar.gz")
+
+
+def test_list_backups_on_target_finds_container_and_landscape_backups(tmp_path: Path):
+    root = tmp_path / "target"
+    container_dir = root / "myapp" / "20260101T030000Z"
+    container_dir.mkdir(parents=True)
+    (container_dir / "meta.json").write_text("{}")
+    (container_dir / "image.tar").write_bytes(b"x" * 100)
+
+    landscape_dir = root / "_landscapes" / "immich" / "20260102T030000Z"
+    landscape_dir.mkdir(parents=True)
+    (landscape_dir / "meta.json").write_text("{}")
+
+    # A stray file that isn't a backup (no meta.json alongside it) must be ignored.
+    (root / "randomfile.txt").write_text("not a backup")
+
+    entries = list_backups_on_target("local_path", json.dumps({"path": str(root)}))
+    by_name = {e["name"]: e for e in entries}
+
+    assert by_name["myapp"]["backup_type"] == "container"
+    assert by_name["myapp"]["relative_key"] == "myapp/20260101T030000Z"
+    assert by_name["myapp"]["size_bytes"] >= 100
+    assert by_name["immich"]["backup_type"] == "landscape"
+    assert by_name["immich"]["relative_key"] == "_landscapes/immich/20260102T030000Z"
+
+
+def test_list_backups_on_target_recognizes_encrypted_meta(tmp_path: Path):
+    root = tmp_path / "target"
+    backup_dir = root / "myapp" / "20260101T030000Z"
+    backup_dir.mkdir(parents=True)
+    (backup_dir / "meta.json.enc").write_bytes(b"encrypted-bytes")
+
+    entries = list_backups_on_target("local_path", json.dumps({"path": str(root)}))
+    assert len(entries) == 1
+    assert entries[0]["name"] == "myapp"
+
+
+def test_list_backups_on_target_missing_root_returns_empty(tmp_path: Path):
+    assert list_backups_on_target("local_path", json.dumps({"path": str(tmp_path / "nope")})) == []
+
+
+def test_list_backups_on_target_rejects_unsupported_type():
+    with pytest.raises(ValueError):
+        list_backups_on_target("onedrive", "{}")
+
+
+def test_download_full_backup_from_target_local_path_recreates_tree(tmp_path: Path):
+    root = tmp_path / "target"
+    backup_dir = root / "myapp" / "20260101T030000Z"
+    (backup_dir / "volumes").mkdir(parents=True)
+    (backup_dir / "meta.json").write_text('{"a": 1}')
+    (backup_dir / "volumes" / "data.tar.gz").write_bytes(b"volume-bytes")
+
+    dest = tmp_path / "restored" / "myapp" / "20260101T030000Z"
+    download_full_backup_from_target(
+        "local_path", json.dumps({"path": str(root)}), "myapp/20260101T030000Z", dest,
+    )
+
+    assert (dest / "meta.json").read_text() == '{"a": 1}'
+    assert (dest / "volumes" / "data.tar.gz").read_bytes() == b"volume-bytes"
+
+
+def test_download_full_backup_from_target_rejects_unsupported_type(tmp_path: Path):
+    with pytest.raises(ValueError):
+        download_full_backup_from_target("onedrive", "{}", "myapp/v1", tmp_path / "out")

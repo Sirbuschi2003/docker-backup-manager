@@ -981,6 +981,7 @@ async function settingsPage() {
       <td style="display:flex; gap:8px;">
         <button class="btn edit-btn">Bearbeiten</button>
         <button class="btn test-btn">Testen</button>
+        ${["local_path", "smb", "s3", "rclone"].includes(t.type) ? '<button class="btn import-btn">Katalog importieren</button>' : ""}
         <button class="btn danger del-btn">Löschen</button>
       </td>
     </tr>`);
@@ -988,6 +989,19 @@ async function settingsPage() {
     row.querySelector(".test-btn").addEventListener("click", async () => {
       try { await api(`/api/settings/storage-targets/${t.id}/test`, { method: "POST" }); toast("Verbindung erfolgreich"); }
       catch (e) { toast(e.message, "error"); }
+    });
+    const importBtn = row.querySelector(".import-btn");
+    if (importBtn) importBtn.addEventListener("click", async () => {
+      if (!confirm(`Speicherziel "${t.name}" nach vorhandenen Backups durchsuchen und in den Katalog übernehmen?`)) return;
+      importBtn.disabled = true;
+      importBtn.textContent = "Durchsuche...";
+      try {
+        const res = await api(`/api/settings/storage-targets/${t.id}/import-catalog`, { method: "POST" });
+        toast(`${res.found} Backup(s) gefunden, ${res.imported} neu übernommen, ${res.skipped} bereits bekannt`);
+        if (res.imported > 0 && state.route === "backups") navigate("backups");
+      } catch (e) { toast(e.message, "error"); }
+      importBtn.disabled = false;
+      importBtn.textContent = "Katalog importieren";
     });
     row.querySelector(".del-btn").addEventListener("click", async () => {
       if (!confirm(`Speicherziel "${t.name}" löschen?`)) return;

@@ -12,7 +12,7 @@ from app.auth import get_current_user
 from app.config import BACKUPS_DIR, DEFAULT_RETENTION_COUNT, DEFAULT_RETENTION_DAYS, TZ_ERROR, TZ_NAME
 from app.database import get_db
 from app.docker_client import is_available
-from app.models import StorageTarget, User
+from app.models import BackupRecord, StorageTarget, User
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -161,6 +161,37 @@ def test_storage_target(target_id: int, db: Session = Depends(get_db), user: Use
         return {"ok": True}
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(400, f"Connection test failed: {exc}")
+
+
+@router.post("/storage-targets/{target_id}/import-catalog")
+def import_catalog_from_target(target_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Scans a storage target for backups that already exist there (e.g. after
+    a full host loss, restoring from an offsite copy) and creates local
+    catalog entries for any not already known. The actual data is only
+    downloaded later, on demand, when a restore is triggered for one of them."""
+    target = db.query(StorageTarget).filter(StorageTarget.id == target_id).first()
+    if not target:
+        raise HTTPException(404, "Storage target not found")
+    try:
+        found = storage_sync.list_backups_on_target(target.type, target.config_json)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, f"Speicherziel konnte nicht durchsucht werden: {exc}")
+
+    imported = 0
+    skipped = 0
+    for entry in found:
+        local_path = str(BACKUPS_DIR / entry["relative_key"])
+        existing = db.query(BackupRecord).filter(BackupRecord.path == local_path).first()
+        if existing:
+            skipped += 1
+            continue
+        db.add(BackupRecord(
+            backup_type=entry["backup_type"], name=entry["name"], path=local_path, status="ok",
+            size_bytes=entry["size_bytes"], streamed_target_id=target.id, created_at=entry["created_at"],
+        ))
+        imported += 1
+    db.commit()
+    return {"imported": imported, "skipped": skipped, "found": len(found)}
 
 
 # ---------- Google Drive / OneDrive OAuth ----------

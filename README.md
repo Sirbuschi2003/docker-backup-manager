@@ -45,6 +45,11 @@ purem Docker Engine auf Linux.
 - Landschafts-/Projekt-Backups lassen sich **als Ganzes wiederherstellen**
   (ein Klick stellt alle Mitglieds-Container wieder her) oder gezielt nur
   einzelne Container daraus
+- **Katalog-Import von einem Speicherziel**: nach einem Totalverlust des alten
+  Hosts genügt es, dasselbe Speicherziel (SMB/S3/lokaler Pfad/rclone) auf dem
+  neuen Host wieder einzurichten und auf „Katalog importieren" zu klicken —
+  die App findet vorhandene Backups automatisch und lädt sie erst beim
+  eigentlichen Wiederherstellen herunter
 - Modernes, responsives Web-UI (hell/dunkel), Login-geschützt mit
   Brute-Force-Sperre nach Fehlversuchen
 
@@ -350,6 +355,20 @@ persönlichen Zugangsdaten — sie erlauben nichts, solange sich niemand über
 den „Anmelden"-Button tatsächlich einloggt.
 
 ## Wiederherstellung auf einem anderen System
+
+**Variante A — Katalog von einem Speicherziel importieren (empfohlen bei
+Totalverlust des alten Hosts):** Docker Backup Manager auf dem neuen Host
+installieren/starten, unter **Einstellungen** dasselbe Speicherziel (SMB, S3,
+lokaler Pfad oder rclone-Remote) erneut anlegen, auf dem deine alten Backups
+liegen, und dort auf **„Katalog importieren"** klicken. Die App durchsucht das
+Ziel nach vorhandenen Backup-Versionen (erkennbar an `meta.json`) und legt
+dafür passende Einträge unter **Backups** an — die eigentlichen Daten werden
+erst beim tatsächlichen Klick auf „Wiederherstellen" automatisch
+heruntergeladen. So brauchst du nichts manuell zu kopieren: Speicherziel
+einrichten, Katalog importieren, wiederherstellen. (Nicht unterstützt für
+Google Drive/OneDrive als Quelle — dort weiterhin Variante B nutzen.)
+
+**Variante B — Backup-Ordner manuell übertragen:**
 
 1. Backup-Ordner (bzw. den entsprechenden Zeitstempel-Unterordner) auf den
    Zielhost übertragen, z. B. per SMB/NFS-Ziel, S3-Download oder `rclone copy`.
