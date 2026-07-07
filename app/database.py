@@ -12,14 +12,20 @@ def _add_missing_columns():
     # Lightweight migration: create_all() only creates missing *tables*, so columns added
     # to existing models in later versions need to be added by hand for already-deployed DBs.
     inspector = inspect(engine)
-    if "users" not in inspector.get_table_names():
-        return
-    existing = {col["name"] for col in inspector.get_columns("users")}
+    tables = set(inspector.get_table_names())
+
     with engine.begin() as conn:
-        if "failed_attempts" not in existing:
-            conn.execute(text("ALTER TABLE users ADD COLUMN failed_attempts INTEGER NOT NULL DEFAULT 0"))
-        if "locked_until" not in existing:
-            conn.execute(text("ALTER TABLE users ADD COLUMN locked_until DATETIME"))
+        if "users" in tables:
+            existing = {col["name"] for col in inspector.get_columns("users")}
+            if "failed_attempts" not in existing:
+                conn.execute(text("ALTER TABLE users ADD COLUMN failed_attempts INTEGER NOT NULL DEFAULT 0"))
+            if "locked_until" not in existing:
+                conn.execute(text("ALTER TABLE users ADD COLUMN locked_until DATETIME"))
+
+        if "schedules" in tables:
+            existing = {col["name"] for col in inspector.get_columns("schedules")}
+            if "storage_target_ids" not in existing:
+                conn.execute(text("ALTER TABLE schedules ADD COLUMN storage_target_ids TEXT NOT NULL DEFAULT '[]'"))
 
 
 def init_db():

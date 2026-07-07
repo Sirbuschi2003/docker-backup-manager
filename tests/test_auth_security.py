@@ -43,6 +43,59 @@ def test_reset_password_script_creates_and_resets_user():
         db.close()
 
 
+def test_init_db_migrates_pre_existing_schedules_table_missing_storage_target_ids(tmp_path, monkeypatch):
+    import importlib
+    import sqlite3
+
+    from app import config, database
+
+    # Simulate a database created before the storage_target_ids column existed
+    # (i.e. anything deployed before commit 6fd3365) to reproduce the exact
+    # startup crash: "sqlite3.OperationalError: no such column: schedules.storage_target_ids".
+    db_path = tmp_path / "old.sqlite3"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        """
+        CREATE TABLE schedules (
+            id INTEGER PRIMARY KEY,
+            name VARCHAR(255) NOT NULL,
+            target_type VARCHAR(16) NOT NULL,
+            target_ref VARCHAR(255),
+            cron_expression VARCHAR(64) NOT NULL,
+            retention_count INTEGER,
+            retention_days INTEGER,
+            enabled BOOLEAN,
+            created_at DATETIME,
+            last_run_at DATETIME,
+            last_status VARCHAR(16)
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setenv("DBM_DB_PATH", str(db_path))
+    try:
+        importlib.reload(config)
+        importlib.reload(database)
+
+        database.init_db()
+
+        inspector_columns = {col["name"] for col in database.inspect(database.engine).get_columns("schedules")}
+        assert "storage_target_ids" in inspector_columns
+
+        from app.models import Schedule
+        db = database.SessionLocal()
+        try:
+            assert db.query(Schedule).all() == []
+        finally:
+            db.close()
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+        importlib.reload(database)
+
+
 def test_secret_key_is_generated_and_persisted(tmp_path, monkeypatch):
     import importlib
     from app import config
