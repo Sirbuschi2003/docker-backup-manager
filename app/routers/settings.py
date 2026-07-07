@@ -104,6 +104,23 @@ def test_storage_target_config(payload: StorageTargetTestPayload, user: User = D
         raise HTTPException(400, f"Connection test failed: {exc}")
 
 
+class SmbSharesPayload(BaseModel):
+    server: str
+    username: str
+    password: str
+    domain: str = ""
+    port: str = "445"
+
+
+@router.post("/smb/shares")
+def list_smb_shares(payload: SmbSharesPayload, user: User = Depends(get_current_user)):
+    try:
+        shares = storage_sync.list_smb_shares(payload.model_dump())
+        return {"shares": shares}
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, f"Freigaben konnten nicht abgerufen werden: {exc}")
+
+
 @router.post("/storage-targets/{target_id}/test")
 def test_storage_target(target_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     target = db.query(StorageTarget).filter(StorageTarget.id == target_id).first()

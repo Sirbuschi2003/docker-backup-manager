@@ -224,7 +224,9 @@ da die Backup/Restore-Funktionen die Docker-API benötigen.
    - **SMB/CIFS (empfohlen für Windows-Freigaben/NAS)**: Server, Freigabename,
      Benutzername + Passwort direkt in der App eintragen — kein Host-Mount,
      kein privilegierter Container nötig. Das ist die Option für „echte“
-     Zugangsdaten.
+     Zugangsdaten. Server, Benutzername und Passwort eintragen und auf
+     „Freigaben anzeigen" klicken, um die vorhandenen Freigaben auf diesem
+     Server aufzulisten, statt den Namen erraten/eintippen zu müssen.
    - **Bereits gemounteter Pfad (SMB/NFS am Host)**: Alternative, falls die
      Freigabe schon auf Host-Ebene gemountet ist (Synology/QNAP/UGREEN
      Freigabenverwaltung oder `/etc/fstab` unter Ubuntu) und nur als Ordner

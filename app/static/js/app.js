@@ -806,12 +806,46 @@ function openStorageTargetModal(existing) {
     if (type === "smb") {
       fieldsEl.innerHTML = `
         <div class="field"><label>Server (IP oder Hostname)</label><input type="text" id="cfg-server" placeholder="192.168.1.50" value="${cfg.server || ""}" /></div>
-        <div class="field"><label>Freigabename (Share)</label><input type="text" id="cfg-share" placeholder="backups" value="${cfg.share || ""}" /></div>
-        <div class="field"><label>Unterordner (optional)</label><input type="text" id="cfg-base-path" placeholder="docker-backup-manager" value="${cfg.base_path || ""}" /></div>
         <div class="field"><label>Benutzername</label><input type="text" id="cfg-username" value="${cfg.username || ""}" /></div>
         <div class="field"><label>Passwort</label><input type="password" id="cfg-password" value="${cfg.password || ""}" /></div>
+        <div class="field">
+          <label>Freigabename (Share)</label>
+          <div style="display:flex; gap:8px;">
+            <input type="text" id="cfg-share" placeholder="backups" value="${cfg.share || ""}" list="cfg-share-list" style="flex:1" />
+            <button type="button" class="btn" id="load-shares-btn">Freigaben anzeigen</button>
+          </div>
+          <datalist id="cfg-share-list"></datalist>
+          <div class="muted" style="font-size:.75rem; margin-top:4px;">Server, Benutzername und Passwort oben ausfüllen, dann auf "Freigaben anzeigen" klicken.</div>
+        </div>
+        <div class="field"><label>Unterordner (optional)</label><input type="text" id="cfg-base-path" placeholder="docker-backup-manager" value="${cfg.base_path || ""}" /></div>
         <div class="field"><label>Domain (optional)</label><input type="text" id="cfg-domain" value="${cfg.domain || ""}" /></div>
         <div class="field"><label>Port</label><input type="text" id="cfg-port" value="${cfg.port || "445"}" /></div>`;
+      fieldsEl.querySelector("#load-shares-btn").addEventListener("click", async () => {
+        const btn = fieldsEl.querySelector("#load-shares-btn");
+        btn.disabled = true;
+        btn.textContent = "Lade...";
+        try {
+          const res = await api("/api/settings/smb/shares", {
+            method: "POST",
+            body: JSON.stringify({
+              server: fieldsEl.querySelector("#cfg-server").value.trim(),
+              username: fieldsEl.querySelector("#cfg-username").value.trim(),
+              password: fieldsEl.querySelector("#cfg-password").value,
+              domain: fieldsEl.querySelector("#cfg-domain").value.trim(),
+              port: fieldsEl.querySelector("#cfg-port").value.trim() || "445",
+            }),
+          });
+          const list = fieldsEl.querySelector("#cfg-share-list");
+          list.innerHTML = res.shares.map((s) => `<option value="${s}"></option>`).join("");
+          if (res.shares.length) toast(`${res.shares.length} Freigabe(n) gefunden`);
+          else toast("Keine Freigaben gefunden", "error");
+        } catch (e) {
+          toast(e.message, "error");
+        } finally {
+          btn.disabled = false;
+          btn.textContent = "Freigaben anzeigen";
+        }
+      });
     } else if (type === "local_path") {
       fieldsEl.innerHTML = `
         <div class="field"><label>Pfad im Container (z.B. gemountete SMB/NFS-Freigabe)</label>

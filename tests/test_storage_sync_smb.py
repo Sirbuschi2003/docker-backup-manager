@@ -1,4 +1,27 @@
-from app.storage_sync import _smb_remote_root
+from app.storage_sync import _filter_browsable_shares, _smb_remote_root
+
+
+class _FakeShare:
+    def __init__(self, name, is_special=False):
+        self.name = name
+        self.isSpecial = is_special
+
+
+def test_filter_browsable_shares_hides_admin_and_special_shares():
+    shares = [
+        _FakeShare("backups"),
+        _FakeShare("media"),
+        _FakeShare("ADMIN$", is_special=True),
+        _FakeShare("C$", is_special=True),
+        _FakeShare("IPC$", is_special=True),
+        _FakeShare("print$", is_special=True),
+    ]
+    assert _filter_browsable_shares(shares) == ["backups", "media"]
+
+
+def test_filter_browsable_shares_hides_dollar_suffixed_even_if_not_flagged_special():
+    shares = [_FakeShare("backups"), _FakeShare("weird$")]
+    assert _filter_browsable_shares(shares) == ["backups"]
 
 
 def test_smb_remote_root_basic():

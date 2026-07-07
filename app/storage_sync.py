@@ -9,7 +9,9 @@ Supported target types:
   - smb: a *real* in-app SMB/CIFS connection (server, share, username,
     password) using a pure-Python SMB2/3 client (`smbprotocol`) - no host
     mount, no privileged container needed. This is the option to use when you
-    want to type a username/password directly into the app.
+    want to type a username/password directly into the app. Share names can
+    be listed rather than typed via list_smb_shares() (uses the lighter
+    `pysmb` library, which - unlike smbprotocol - exposes share enumeration).
   - s3: any S3-compatible object storage (AWS S3, MinIO, Wasabi, Backblaze B2,
     Ceph RGW, ...) via boto3, using access key/secret + endpoint URL.
   - rclone: shells out to the bundled `rclone` binary for every other backend
@@ -97,6 +99,47 @@ def _smb_register_session(config: dict):
         password=config["password"],
         port=int(config.get("port") or 445),
     )
+
+
+# Share types the SMB protocol itself reports; used to keep the actual data
+# shares in the "list available shares" helper below and hide plumbing.
+_HIDDEN_SHARE_TYPES = {"IPC", "PRINTER"}
+
+
+def _filter_browsable_shares(raw_shares: list) -> list[str]:
+    """Pure helper (no network) so the filtering logic is unit-testable.
+    Takes pysmb SharedDevice-like objects (must have .name and .isSpecial /
+    .type) and returns plain share names a user would actually want to pick,
+    i.e. not admin/print/IPC shares such as ADMIN$, C$, IPC$, print$."""
+    names = []
+    for share in raw_shares:
+        if getattr(share, "isSpecial", False):
+            continue
+        if share.name.upper().endswith("$"):
+            continue
+        names.append(share.name)
+    return names
+
+
+def list_smb_shares(config: dict) -> list[str]:
+    """Connects to the given SMB server and returns the names of shares a
+    normal user could back up to, so the UI can offer a picker instead of
+    requiring the exact share name to be typed in."""
+    from smb.SMBConnection import SMBConnection  # imported lazily, only needed for this lookup
+
+    username = config["username"]
+    domain = config.get("domain", "").strip()
+    server = config["server"]
+    port = int(config.get("port") or 445)
+
+    conn = SMBConnection(username, config["password"], "docker-backup-manager", server,
+                          domain=domain, use_ntlm_v2=True, is_direct_tcp=True)
+    try:
+        if not conn.connect(server, port, timeout=15):
+            raise RuntimeError("SMB authentication failed")
+        return _filter_browsable_shares(conn.listShares())
+    finally:
+        conn.close()
 
 
 def sync_smb(backup_path: Path, config: dict) -> None:
