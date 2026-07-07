@@ -120,6 +120,78 @@ def test_backup_container_removes_partial_dir_on_failure(tmp_path: Path, monkeyp
     assert not result.path.exists()  # partial data must not linger and inflate disk usage
 
 
+def test_backup_container_stops_and_restarts_running_container_when_opted_in(tmp_path: Path, monkeypatch):
+    container = MagicMock()
+    container.name = "postgres"
+    container.attrs = {
+        "Mounts": [{"Type": "volume", "Name": "pg-data"}],
+        "NetworkSettings": {"Networks": {}},
+        "Config": {"Image": "postgres:16"},
+        "State": {"Status": "running"},
+    }
+    container.image.save.return_value = iter([b"image-bytes"])
+
+    client = MagicMock()
+    client.containers.get.return_value = container
+    client.version.return_value = {"ApiVersion": "1.45"}
+    client.containers.run.side_effect = lambda image, command=None, volumes=None, detach=None: _fake_helper_container([b"data"])
+    monkeypatch.setattr(backup_engine, "get_client", lambda: client)
+
+    result = backup_engine.backup_container("postgres", dest_root=tmp_path, stop_container=True)
+
+    assert result.ok is True
+    container.stop.assert_called_once()
+    container.start.assert_called_once()
+
+
+def test_backup_container_does_not_stop_already_stopped_container(tmp_path: Path, monkeypatch):
+    container = MagicMock()
+    container.name = "postgres"
+    container.attrs = {
+        "Mounts": [],
+        "NetworkSettings": {"Networks": {}},
+        "Config": {"Image": "postgres:16"},
+        "State": {"Status": "exited"},
+    }
+    container.image.save.return_value = iter([b"image-bytes"])
+
+    client = MagicMock()
+    client.containers.get.return_value = container
+    client.version.return_value = {"ApiVersion": "1.45"}
+    monkeypatch.setattr(backup_engine, "get_client", lambda: client)
+
+    result = backup_engine.backup_container("postgres", dest_root=tmp_path, stop_container=True)
+
+    assert result.ok is True
+    container.stop.assert_not_called()
+    container.start.assert_not_called()
+
+
+def test_backup_container_restarts_container_even_if_backup_fails_midway(tmp_path: Path, monkeypatch):
+    container = MagicMock()
+    container.name = "postgres"
+    container.attrs = {
+        "Mounts": [{"Type": "volume", "Name": "pg-data"}],
+        "NetworkSettings": {"Networks": {}},
+        "Config": {"Image": "postgres:16"},
+        "State": {"Status": "running"},
+    }
+    container.image.save.return_value = iter([b"image-bytes"])
+
+    client = MagicMock()
+    client.containers.get.return_value = container
+    client.version.return_value = {"ApiVersion": "1.45"}
+    monkeypatch.setattr(backup_engine, "get_client", lambda: client)
+    monkeypatch.setattr(backup_engine, "backup_volume_to_file",
+                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("disk full mid-volume")))
+
+    result = backup_engine.backup_container("postgres", dest_root=tmp_path, stop_container=True)
+
+    assert result.ok is False
+    container.stop.assert_called_once()
+    container.start.assert_called_once()  # never left down, even on failure
+
+
 def test_should_backup_bind_mount_skips_docker_internals():
     assert backup_engine._should_backup_bind_mount("/var/run/docker.sock") is False
     assert backup_engine._should_backup_bind_mount("/proc") is False
@@ -263,7 +335,7 @@ def test_backup_landscape_stops_after_a_cancelled_member(tmp_path: Path, monkeyp
                                      error="Backup abgebrochen", cancelled=True)
     calls = []
 
-    def fake_backup_container(name, dest_root, stream_target=None, should_cancel=None):
+    def fake_backup_container(name, dest_root, stream_target=None, should_cancel=None, stop_container=None):
         calls.append(name)
         return cancelled_result
 
@@ -274,6 +346,27 @@ def test_backup_landscape_stops_after_a_cancelled_member(tmp_path: Path, monkeyp
     assert calls == ["app-a"]  # stopped immediately after the cancelled member, never reached app-b
     assert result.cancelled is True
     assert result.ok is False
+
+
+def test_backup_landscape_passes_stop_containers_to_each_member(tmp_path: Path, monkeypatch):
+    container_a = MagicMock(name="a")
+    container_a.name = "app-a"
+    container_b = MagicMock(name="b")
+    container_b.name = "app-b"
+    monkeypatch.setattr(backup_engine, "list_landscape_containers",
+                         lambda project_filter=None, name_contains=None: [container_a, container_b])
+
+    captured = []
+
+    def fake_backup_container(name, dest_root, stream_target=None, should_cancel=None, stop_container=None):
+        captured.append((name, stop_container))
+        return BackupResult(ok=True, name=name, path=tmp_path / name / "v1", size_bytes=1)
+
+    monkeypatch.setattr(backup_engine, "backup_container", fake_backup_container)
+
+    backup_engine.backup_landscape(dest_root=tmp_path, stop_containers=True)
+
+    assert captured == [("app-a", True), ("app-b", True)]
 
 
 def test_backup_landscape_carries_member_results_for_tracking(tmp_path: Path, monkeypatch):
@@ -289,7 +382,7 @@ def test_backup_landscape_carries_member_results_for_tracking(tmp_path: Path, mo
         "app-b": BackupResult(ok=False, name="app-b", path=tmp_path / "app-b" / "v1", error="boom"),
     }
     monkeypatch.setattr(backup_engine, "backup_container",
-                         lambda name, dest_root, stream_target=None, should_cancel=None: canned_results[name])
+                         lambda name, dest_root, stream_target=None, should_cancel=None, stop_container=None: canned_results[name])
 
     result = backup_engine.backup_landscape(dest_root=tmp_path)
 

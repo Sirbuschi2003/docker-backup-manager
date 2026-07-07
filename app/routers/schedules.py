@@ -25,6 +25,7 @@ class SchedulePayload(BaseModel):
     retention_days: int = 0
     storage_target_ids: list[int] = []
     stream_volumes_target_id: Optional[int] = None  # if set, volumes stream directly here instead of being written locally
+    stop_containers: bool = False  # opt-in: stop container(s) before archiving, restart afterwards, for an application-consistent backup
     enabled: bool = True
 
 
@@ -45,7 +46,8 @@ def list_schedules(db: Session = Depends(get_db), user: User = Depends(get_curre
             "cron_expression": s.cron_expression, "retention_count": s.retention_count,
             "retention_days": s.retention_days,
             "storage_target_ids": json.loads(s.storage_target_ids or "[]"),
-            "stream_volumes_target_id": s.stream_volumes_target_id, "enabled": s.enabled,
+            "stream_volumes_target_id": s.stream_volumes_target_id,
+            "stop_containers": s.stop_containers, "enabled": s.enabled,
             "last_run_at": s.last_run_at.isoformat() + "Z" if s.last_run_at else None,
             "last_status": s.last_status,
         } for s in rows

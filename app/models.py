@@ -61,6 +61,7 @@ class Schedule(Base):
     retention_days = Column(Integer, default=0)
     storage_target_ids = Column(Text, nullable=False, default="[]")  # JSON list of StorageTarget ids to sync to
     stream_volumes_target_id = Column(Integer, nullable=True)  # if set, volumes are streamed directly here instead of being written locally first (bypasses at-rest encryption for volume data)
+    stop_containers = Column(Boolean, nullable=False, default=False)  # opt-in: stop the container(s) before archiving volumes/binds and restart afterwards, for an application-consistent (rather than crash-consistent) backup
     enabled = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     last_run_at = Column(DateTime, nullable=True)

@@ -393,11 +393,6 @@ async function dashboardPage() {
 async function pickStorageTargetsAndRun(title, runFn) {
   let storageTargets = [];
   try { storageTargets = (await api("/api/settings/storage-targets")).targets; } catch (e) {}
-  if (!storageTargets.length) {
-    // Nothing configured - nothing to choose, just run against the local backup store.
-    await runFn(null, null);
-    return;
-  }
   const targetsHtml = storageTargets.map((t) => `
     <label style="display:flex; align-items:center; gap:8px; padding:6px 0;">
       <input type="checkbox" class="b-storage-target" value="${t.id}" style="width:auto;" ${t.enabled ? "checked" : "disabled"} />
@@ -412,6 +407,7 @@ async function pickStorageTargetsAndRun(title, runFn) {
     <div class="modal-overlay">
       <div class="modal">
         <h3>${title}</h3>
+        ${storageTargets.length ? `
         <div class="field">
           <label>Zusätzlich hochladen nach (neben dem lokalen Speicher)</label>
           <div>${targetsHtml}</div>
@@ -427,6 +423,16 @@ async function pickStorageTargetsAndRun(title, runFn) {
             dieser App (die greift nur bei lokal geschriebenen Dateien) - nur bei vertrauenswürdigem
             Ziel nutzen. Nur lokaler Pfad, SMB, S3 und rclone unterstützt.
           </div>
+        </div>` : ""}
+        <div class="field">
+          <label style="display:flex; align-items:center; gap:8px;">
+            <input type="checkbox" id="b-stop-containers" style="width:auto;" />
+            Container(n) vor dem Backup stoppen, danach wieder starten
+          </label>
+          <div class="muted" style="font-size:.75rem; margin-top:4px;">
+            Für ein anwendungskonsistentes statt nur crash-konsistentes Backup (z. B. bei
+            Datenbanken). Bedeutet eine kurze Downtime für die Dauer des Backups.
+          </div>
         </div>
         <div class="row-actions">
           <button class="btn" id="cancel-btn">Abbrechen</button>
@@ -438,10 +444,11 @@ async function pickStorageTargetsAndRun(title, runFn) {
   overlay.querySelector("#cancel-btn").addEventListener("click", () => overlay.remove());
   overlay.querySelector("#start-btn").addEventListener("click", async () => {
     const ids = Array.from(overlay.querySelectorAll(".b-storage-target:checked")).map((el) => parseInt(el.value, 10));
-    const streamTargetVal = overlay.querySelector("#b-stream-target").value;
-    const streamTargetId = streamTargetVal ? parseInt(streamTargetVal, 10) : null;
+    const streamTargetEl = overlay.querySelector("#b-stream-target");
+    const streamTargetId = streamTargetEl && streamTargetEl.value ? parseInt(streamTargetEl.value, 10) : null;
+    const stopContainers = overlay.querySelector("#b-stop-containers").checked;
     overlay.remove();
-    await runFn(ids, streamTargetId);
+    await runFn(ids, streamTargetId, stopContainers);
   });
   document.body.appendChild(overlay);
 }
@@ -474,12 +481,15 @@ async function containersPage() {
       <td><button class="btn">Backup jetzt</button></td>
     </tr>`);
     row.querySelector("button").addEventListener("click", async (e) => {
-      await pickStorageTargetsAndRun(`Backup für ${c.name}`, async (storageTargetIds, streamTargetId) => {
+      await pickStorageTargetsAndRun(`Backup für ${c.name}`, async (storageTargetIds, streamTargetId, stopContainers) => {
         e.target.disabled = true;
         try {
           await api(`/api/containers/${encodeURIComponent(c.name)}/backup`, {
             method: "POST",
-            body: JSON.stringify({ storage_target_ids: storageTargetIds, stream_volumes_target_id: streamTargetId }),
+            body: JSON.stringify({
+              storage_target_ids: storageTargetIds, stream_volumes_target_id: streamTargetId,
+              stop_container: stopContainers,
+            }),
           });
           toast(`Backup für ${c.name} gestartet`);
           pollGlobalJobs();
@@ -491,11 +501,14 @@ async function containersPage() {
   });
 
   wrap.querySelector("#backup-all-btn").addEventListener("click", async () => {
-    await pickStorageTargetsAndRun("Gesamte Landschaft sichern", async (storageTargetIds, streamTargetId) => {
+    await pickStorageTargetsAndRun("Gesamte Landschaft sichern", async (storageTargetIds, streamTargetId, stopContainers) => {
       try {
         await api("/api/backups/landscape", {
           method: "POST",
-          body: JSON.stringify({ storage_target_ids: storageTargetIds, stream_volumes_target_id: streamTargetId }),
+          body: JSON.stringify({
+            storage_target_ids: storageTargetIds, stream_volumes_target_id: streamTargetId,
+            stop_containers: stopContainers,
+          }),
         });
         toast("Landschafts-Backup gestartet");
         pollGlobalJobs();
@@ -844,6 +857,17 @@ async function openScheduleModal(existing) {
             vertraust (z. B. eigenes NAS im LAN). Nur lokaler Pfad, SMB, S3 und rclone unterstützt.
           </div>
         </div>
+        <div class="field">
+          <label style="display:flex; align-items:center; gap:8px;">
+            <input type="checkbox" id="s-stop-containers" style="width:auto;" />
+            Container(n) vor dem Backup stoppen, danach wieder starten
+          </label>
+          <div class="muted" style="font-size:.75rem; margin-top:4px;">
+            Für ein anwendungskonsistentes statt nur crash-konsistentes Backup (z. B. bei
+            Datenbanken). Bedeutet eine kurze Downtime während jedes Laufs dieses Zeitplans.
+            Standardmäßig aus, damit bestehende Zeitpläne sich nicht ändern.
+          </div>
+        </div>
         <div class="row-actions">
           <button class="btn" id="cancel-btn">Abbrechen</button>
           <button class="btn primary" id="save-btn">${existing ? "Speichern" : "Erstellen"}</button>
@@ -864,6 +888,7 @@ async function openScheduleModal(existing) {
     if (existing.stream_volumes_target_id) {
       overlay.querySelector("#s-stream-target").value = String(existing.stream_volumes_target_id);
     }
+    overlay.querySelector("#s-stop-containers").checked = !!existing.stop_containers;
   }
   overlay.querySelector("#s-target-type").addEventListener("change", (e) => {
     overlay.querySelector("#s-container-field").style.display = e.target.value === "container" ? "block" : "none";
@@ -914,6 +939,7 @@ async function openScheduleModal(existing) {
       storage_target_ids: storageTargetIds,
       stream_volumes_target_id: overlay.querySelector("#s-stream-target").value
         ? parseInt(overlay.querySelector("#s-stream-target").value, 10) : null,
+      stop_containers: overlay.querySelector("#s-stop-containers").checked,
       enabled: existing ? existing.enabled : true,
     };
     try {

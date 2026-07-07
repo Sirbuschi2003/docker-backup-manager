@@ -42,7 +42,8 @@ def list_containers(user: User = Depends(get_current_user)):
 
 
 def _run_container_backup_job(job_id: str, container_name: str, storage_target_ids: Optional[list[int]],
-                               stream_volumes_target_id: Optional[int] = None):
+                               stream_volumes_target_id: Optional[int] = None,
+                               stop_container: bool = False):
     db = SessionLocal()
     try:
         def progress(step, name, total=None):
@@ -52,6 +53,7 @@ def _run_container_backup_job(job_id: str, container_name: str, storage_target_i
         result = backup_engine.backup_container(
             container_name, BACKUPS_DIR, on_progress=progress, stream_target=stream_target,
             should_cancel=lambda: job_tracker.is_cancel_requested(job_id),
+            stop_container=stop_container,
         )
         record = BackupRecord(
             backup_type="container",
@@ -91,6 +93,7 @@ def _run_container_backup_job(job_id: str, container_name: str, storage_target_i
 class ContainerBackupPayload(BaseModel):
     storage_target_ids: Optional[list[int]] = None
     stream_volumes_target_id: Optional[int] = None
+    stop_container: bool = False
 
 
 @router.post("/{name}/backup")
@@ -99,7 +102,7 @@ def backup_container_now(name: str, payload: ContainerBackupPayload = ContainerB
     job = job_tracker.create_job("backup", name, total_steps=1)
     thread = threading.Thread(
         target=_run_container_backup_job,
-        args=(job.id, name, payload.storage_target_ids, payload.stream_volumes_target_id),
+        args=(job.id, name, payload.storage_target_ids, payload.stream_volumes_target_id, payload.stop_container),
         daemon=True,
     )
     thread.start()

@@ -81,11 +81,13 @@ class LandscapeBackupPayload(BaseModel):
     project_filter: Optional[str] = None
     storage_target_ids: Optional[list[int]] = None
     stream_volumes_target_id: Optional[int] = None
+    stop_containers: bool = False
 
 
 def _run_landscape_job(job_id: str, label: Optional[str], project_filter: Optional[str],
                         storage_target_ids: Optional[list[int]],
-                        stream_volumes_target_id: Optional[int] = None):
+                        stream_volumes_target_id: Optional[int] = None,
+                        stop_containers: bool = False):
     db = SessionLocal()
     try:
         def progress(step, name, total=None):
@@ -95,6 +97,7 @@ def _run_landscape_job(job_id: str, label: Optional[str], project_filter: Option
         result = backup_engine.backup_landscape(
             BACKUPS_DIR, project_filter=project_filter, label=label, on_progress=progress,
             stream_target=stream_target, should_cancel=lambda: job_tracker.is_cancel_requested(job_id),
+            stop_containers=stop_containers,
         )
         record = BackupRecord(
             backup_type="landscape",
@@ -150,7 +153,7 @@ def backup_landscape_now(payload: LandscapeBackupPayload, user: User = Depends(g
     thread = threading.Thread(
         target=_run_landscape_job,
         args=(job.id, payload.label, payload.project_filter, payload.storage_target_ids,
-              payload.stream_volumes_target_id),
+              payload.stream_volumes_target_id, payload.stop_containers),
         daemon=True,
     )
     thread.start()

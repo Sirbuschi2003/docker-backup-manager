@@ -32,6 +32,8 @@ def _add_missing_columns():
                 conn.execute(text("ALTER TABLE schedules ADD COLUMN stream_volumes_target_id INTEGER"))
             if "name_contains" not in existing:
                 conn.execute(text("ALTER TABLE schedules ADD COLUMN name_contains TEXT"))
+            if "stop_containers" not in existing:
+                conn.execute(text("ALTER TABLE schedules ADD COLUMN stop_containers BOOLEAN NOT NULL DEFAULT 0"))
 
         if "backup_records" in tables:
             existing = {col["name"] for col in inspector.get_columns("backup_records")}

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import logging
 import shutil
 import tarfile
 from dataclasses import dataclass, field
@@ -30,6 +31,8 @@ from typing import Callable, Iterator, Optional
 from app import encryption
 from app.config import BACKUPS_DIR, DOCKER_HELPER_IMAGE
 from app.docker_client import get_client
+
+logger = logging.getLogger("dbm.backup_engine")
 
 # (target_type, config_json, target_id) - passed down from routers/scheduler,
 # which already have DB access to resolve a StorageTarget. When set, volume
@@ -201,7 +204,8 @@ def restore_volume_from_file(volume_name: str, src_tar_gz: Path) -> None:
 def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
                       on_progress: ProgressCallback = _noop_progress,
                       stream_target: Optional[StreamTarget] = None,
-                      should_cancel: ShouldCancel = _never_cancel) -> BackupResult:
+                      should_cancel: ShouldCancel = _never_cancel,
+                      stop_container: bool = False) -> BackupResult:
     client = get_client()
     container = client.containers.get(container_id_or_name)
     attrs = container.attrs
@@ -215,8 +219,13 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
         if m.get("Type") == "bind" and _should_backup_bind_mount(m.get("Source", ""))
     ]
     encrypt = encryption.is_enabled()
-    # inspect+networks, image, finalize, one per volume, one per bind mount, optional encrypt
-    total_steps = 3 + len(volume_mounts) + len(bind_mounts) + (1 if encrypt else 0)
+    # Only actually stop/restart if it's running to begin with - stopping an
+    # already-stopped container would just be a no-op that restarts it
+    # unexpectedly (the user may have stopped it deliberately).
+    should_stop = stop_container and attrs.get("State", {}).get("Status") == "running"
+    container_stopped = False
+    # inspect+networks, image, finalize, one per volume, one per bind mount, optional encrypt, optional stop+restart
+    total_steps = 3 + len(volume_mounts) + len(bind_mounts) + (1 if encrypt else 0) + (2 if should_stop else 0)
 
     try:
         _check_cancel(should_cancel, "before start")
@@ -248,6 +257,13 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
             for chunk in container.image.save(named=True):
                 _check_cancel(should_cancel, "saving image")
                 f.write(chunk)
+
+        if should_stop:
+            step += 1
+            _check_cancel(should_cancel, f"before stopping {name}")
+            on_progress(step, f"Stopping {name} for a consistent backup", total_steps)
+            container.stop()
+            container_stopped = True
 
         volumes_dir = backup_dir / "volumes"
         volume_names = []
@@ -289,6 +305,12 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
                 on_progress(step, f"Archiving bind mount {destination}", total_steps)
                 backup_volume_to_file(source, binds_dir / bind_filename, should_cancel=should_cancel)
 
+        if container_stopped:
+            step += 1
+            on_progress(step, f"Starting {name} again", total_steps)
+            container.start()
+            container_stopped = False
+
         step += 1
         on_progress(step, "Finalizing", total_steps)
         meta = {
@@ -325,6 +347,15 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
         # failed BackupResult has no size_bytes and isn't retention-eligible either.
         shutil.rmtree(backup_dir, ignore_errors=True)
         return BackupResult(ok=False, name=name, path=backup_dir, error=str(exc))
+    finally:
+        # No matter how we leave this function (cancelled mid-volume, a volume
+        # archive raising, or anything else) - never leave the user's
+        # container down because a backup failed partway through.
+        if container_stopped:
+            try:
+                container.start()
+            except Exception:  # noqa: BLE001
+                logger.exception("Failed to restart container %s after backup", name)
 
 
 def list_landscape_containers(project_filter: Optional[str] = None,
@@ -352,7 +383,8 @@ def backup_landscape(dest_root: Path = BACKUPS_DIR, project_filter: Optional[str
                       label: Optional[str] = None,
                       on_progress: ProgressCallback = _noop_progress,
                       stream_target: Optional[StreamTarget] = None,
-                      should_cancel: ShouldCancel = _never_cancel) -> BackupResult:
+                      should_cancel: ShouldCancel = _never_cancel,
+                      stop_containers: bool = False) -> BackupResult:
     containers = list_landscape_containers(project_filter, name_contains)
     ts = _timestamp()
     landscape_name = label or project_filter or name_contains or "landscape"
@@ -369,7 +401,8 @@ def backup_landscape(dest_root: Path = BACKUPS_DIR, project_filter: Optional[str
             cancelled = True
             break
         on_progress(idx, f"Backing up {c.name} ({idx}/{total})", total)
-        result = backup_container(c.name, dest_root, stream_target=stream_target, should_cancel=should_cancel)
+        result = backup_container(c.name, dest_root, stream_target=stream_target, should_cancel=should_cancel,
+                                   stop_container=stop_containers)
         member_names.append(result.name)
         member_results.append(result)
         if result.cancelled:

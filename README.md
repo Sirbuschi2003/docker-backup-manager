@@ -304,6 +304,21 @@ Volume fertig kopiert ist), bricht dann sauber ab und räumt bereits
 angelegte, aber unvollständige Backup-Verzeichnisse auf. Ein echtes
 Pause/Fortsetzen gibt es nicht, nur Abbrechen.
 
+### Anwendungskonsistente Backups (Container stoppen)
+
+Standardmäßig läuft ein Backup bei laufendem Container ("crash-konsistent" -
+so, als hätte der Server einen Stromausfall gehabt; für die meisten Apps völlig
+ausreichend, aber bei Datenbanken theoretisch riskant, falls gerade mitten in
+einem Schreibvorgang gesichert wird). Sowohl bei Zeitplänen als auch bei
+manuell gestarteten Backups gibt es dafür optional den Schalter „Container(n)
+vor dem Backup stoppen, danach wieder starten" - damit wird der Container (bei
+einer Landschaft: jeder betroffene Container einzeln) vor dem Archivieren
+seiner Volumes/Bind-Mounts gestoppt und direkt danach wieder gestartet, für ein
+wirklich konsistentes Abbild. Das bedeutet eine kurze Downtime für die Dauer
+des jeweiligen Backups. Der Schalter ist standardmäßig deaktiviert, damit sich
+bestehende Zeitpläne nicht ändern; bereits gestoppte Container werden dabei
+nicht angefasst (kein ungewolltes Starten).
+
 ### Volumes direkt streamen (ohne lokalen Speicherbedarf)
 
 Standardmäßig wird ein Backup zuerst **komplett lokal** unter `/data/backups`

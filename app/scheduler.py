@@ -40,12 +40,14 @@ def run_schedule(schedule_id: int):
             should_cancel = lambda: job_tracker.is_cancel_requested(job.id)  # noqa: E731
             if sched.target_type == "container":
                 result = backup_engine.backup_container(sched.target_ref, BACKUPS_DIR, on_progress=progress,
-                                                          stream_target=stream_target, should_cancel=should_cancel)
+                                                          stream_target=stream_target, should_cancel=should_cancel,
+                                                          stop_container=sched.stop_containers)
             else:
                 result = backup_engine.backup_landscape(BACKUPS_DIR, project_filter=sched.project_filter,
                                                           name_contains=sched.name_contains,
                                                           label=sched.name, on_progress=progress,
-                                                          stream_target=stream_target, should_cancel=should_cancel)
+                                                          stream_target=stream_target, should_cancel=should_cancel,
+                                                          stop_containers=sched.stop_containers)
 
             record = BackupRecord(
                 backup_type=sched.target_type,
