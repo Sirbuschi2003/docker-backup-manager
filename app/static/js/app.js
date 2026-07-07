@@ -57,7 +57,6 @@ function toast(message, type = "ok") {
 
 // ---------- global job tray (always visible, on every page) ----------
 let jobTrayEl;
-let dashboardJobsTimer = null;
 let settingsClockTimer = null;
 const toastedJobIds = new Set();
 const finishedJobHideAt = new Map(); // jobId -> timestamp when it should be removed from the tray
@@ -115,6 +114,29 @@ function updateJobCard(card, job) {
   }
 }
 
+function _syncJobCardsInContainer(container, jobs, emptyMessage) {
+  if (!jobs.length) {
+    if (emptyMessage && !container.querySelector(".empty-state")) {
+      container.innerHTML = `<div class="empty-state">${emptyMessage}</div>`;
+    }
+    return;
+  }
+  const emptyState = container.querySelector(".empty-state");
+  if (emptyState) emptyState.remove();
+  const visibleIds = new Set(jobs.map((j) => String(j.id)));
+  container.querySelectorAll(".job-card").forEach((card) => {
+    if (!visibleIds.has(card.dataset.jobId)) card.remove();
+  });
+  jobs.forEach((job) => {
+    const existing = container.querySelector(`.job-card[data-job-id="${job.id}"]`);
+    if (existing) updateJobCard(existing, job);
+    else container.appendChild(renderJobCard(job));
+  });
+}
+
+// Single shared poll for both the floating tray (every page) and the
+// Dashboard's "Letzte Jobs" list (only patched if that element is currently
+// on screen) - one /api/jobs request per tick, not one per consumer.
 async function pollGlobalJobs() {
   let jobs;
   try {
@@ -133,19 +155,14 @@ async function pollGlobalJobs() {
     }
   }
 
-  const visible = jobs.filter((j) => j.status === "running" ||
+  const trayVisible = jobs.filter((j) => j.status === "running" ||
     (finishedJobHideAt.has(j.id) && finishedJobHideAt.get(j.id) > now)).slice(0, 5);
+  _syncJobCardsInContainer(ensureJobTray(), trayVisible, null);
 
-  const tray = ensureJobTray();
-  const visibleIds = new Set(visible.map((j) => String(j.id)));
-  tray.querySelectorAll(".job-card").forEach((card) => {
-    if (!visibleIds.has(card.dataset.jobId)) card.remove();
-  });
-  visible.forEach((job) => {
-    const existing = tray.querySelector(`.job-card[data-job-id="${job.id}"]`);
-    if (existing) updateJobCard(existing, job);
-    else tray.appendChild(renderJobCard(job));
-  });
+  const dashboardContainer = document.getElementById("jobs-container");
+  if (dashboardContainer) {
+    _syncJobCardsInContainer(dashboardContainer, jobs.slice(0, 6), "Keine Jobs bisher");
+  }
 }
 
 function startGlobalJobPoller() {
@@ -258,10 +275,6 @@ function shell(activeKey, contentEl) {
 
 async function navigate(key) {
   state.route = key;
-  if (dashboardJobsTimer) {
-    clearInterval(dashboardJobsTimer);
-    dashboardJobsTimer = null;
-  }
   if (settingsClockTimer) {
     clearInterval(settingsClockTimer);
     settingsClockTimer = null;
@@ -330,36 +343,15 @@ async function dashboardPage() {
     <div id="jobs-container" class="grid cols-3"></div>
   </div>`);
 
+  // Initial render only - pollGlobalJobs() (already running every 1.5s from
+  // boot()) patches #jobs-container on every tick from here on, the same
+  // single /api/jobs request that also drives the floating tray.
   const jobsContainer = wrap.querySelector("#jobs-container");
   if (!jobsData.jobs.length) {
     jobsContainer.appendChild(h(`<div class="empty-state">Keine Jobs bisher</div>`));
   } else {
     jobsData.jobs.slice(0, 6).forEach((job) => jobsContainer.appendChild(renderJobCard(job)));
   }
-
-  async function refreshDashboardJobs() {
-    let jobs;
-    try { jobs = (await api("/api/jobs")).jobs; } catch (e) { return; }
-    jobs = jobs.slice(0, 6);
-    if (!jobs.length) {
-      if (!jobsContainer.querySelector(".empty-state")) {
-        jobsContainer.innerHTML = `<div class="empty-state">Keine Jobs bisher</div>`;
-      }
-      return;
-    }
-    const emptyState = jobsContainer.querySelector(".empty-state");
-    if (emptyState) emptyState.remove();
-    const visibleIds = new Set(jobs.map((j) => String(j.id)));
-    jobsContainer.querySelectorAll(".job-card").forEach((card) => {
-      if (!visibleIds.has(card.dataset.jobId)) card.remove();
-    });
-    jobs.forEach((job) => {
-      const existing = jobsContainer.querySelector(`.job-card[data-job-id="${job.id}"]`);
-      if (existing) updateJobCard(existing, job);
-      else jobsContainer.appendChild(renderJobCard(job));
-    });
-  }
-  dashboardJobsTimer = setInterval(refreshDashboardJobs, 1500);
 
   return wrap;
 }
