@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 import json
 import logging
+from pathlib import Path
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -69,7 +70,9 @@ def run_schedule(schedule_id: int):
                     progress(1, label, 1)
 
                 target_ids = json.loads(sched.storage_target_ids or "[]")
-                storage_sync.sync_to_selected_targets(result.path, target_ids, on_progress=upload_progress)
+                sync_results = storage_sync.sync_to_selected_targets(result.path, target_ids, on_progress=upload_progress)
+                record.synced_target_ids = json.dumps([r["target_id"] for r in sync_results if r["ok"]])
+                db.commit()
 
             job_tracker.finish_job(job.id, result.ok, result.error, record.id)
 
@@ -89,6 +92,9 @@ def run_schedule(schedule_id: int):
 
 
 def _apply_retention(db, sched: Schedule):
+    from app.models import StorageTarget
+    from app.storage_sync import _relative_key
+
     records = db.query(BackupRecord).filter(BackupRecord.name == sched.name).all()
     if sched.target_type == "container" and sched.target_ref:
         records = db.query(BackupRecord).filter(BackupRecord.name == sched.target_ref).all()
@@ -98,10 +104,26 @@ def _apply_retention(db, sched: Schedule):
     if not prune_ids:
         return
     for r in records:
-        if r.id in prune_ids:
+        if r.id not in prune_ids:
+            continue
+        try:
+            for target_id in json.loads(r.synced_target_ids or "[]"):
+                target = db.query(StorageTarget).filter(StorageTarget.id == target_id).first()
+                if not target:
+                    continue
+                try:
+                    storage_sync.delete_from_target(target.type, target.config_json, _relative_key(Path(r.path)))
+                except Exception:  # noqa: BLE001
+                    logger.exception("Retention: failed to remove %s from target %s", r.path, target.name)
             backup_engine.delete_backup(r.path)
             db.delete(r)
-    db.commit()
+            # Commit per record: if a later deletion in this batch fails, already
+            # processed ones must not be rolled back or re-attempted next run,
+            # since their local files are already gone from disk at this point.
+            db.commit()
+        except Exception:  # noqa: BLE001
+            logger.exception("Retention: failed to prune backup %s (id=%s)", r.path, r.id)
+            db.rollback()
 
 
 def add_or_update_job(sched: Schedule):

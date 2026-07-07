@@ -21,6 +21,20 @@ router = APIRouter(prefix="/api/backups", tags=["backups"])
 @router.get("")
 def list_backups(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     records = db.query(BackupRecord).order_by(BackupRecord.created_at.desc()).all()
+
+    # Self-heal: a successful backup whose directory no longer exists on disk
+    # (e.g. deleted outside the app, or left behind by a retention pass that
+    # was interrupted before committing) is just stale, misleading data -
+    # drop it rather than showing a version that can never actually be
+    # restored or re-deleted. Failed backups intentionally have no directory
+    # (the partial data is cleaned up right away), so those are left alone.
+    stale = [r for r in records if r.status == "ok" and not Path(r.path).exists()]
+    if stale:
+        for r in stale:
+            db.delete(r)
+        db.commit()
+        records = [r for r in records if r not in stale]
+
     grouped: dict[str, list] = {}
     for r in records:
         grouped.setdefault(r.name, []).append({
