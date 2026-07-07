@@ -12,6 +12,8 @@ class User(Base):
     username = Column(String(64), unique=True, nullable=False)
     password_hash = Column(String(255), nullable=False)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    failed_attempts = Column(Integer, nullable=False, default=0)
+    locked_until = Column(DateTime, nullable=True)
 
 
 class BackupRecord(Base):

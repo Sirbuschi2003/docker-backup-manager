@@ -148,8 +148,8 @@ services:
     restart: unless-stopped
     ports:
       - "8420:8420"
-    environment:
-      DBM_SECRET_KEY: "please-change-this-to-a-long-random-string"
+    # environment:
+    #   DBM_SECRET_KEY: "please-change-this-to-a-long-random-string"  # optional, see "Sicherheit"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - dbm_data:/data
@@ -283,10 +283,25 @@ einem Passwort-Manager)!
 
 - Zugriff auf die Web-UI ist durchgehend loginpflichtig (Session-Cookie,
   bcrypt-gehashte Passwörter)
-- `DBM_SECRET_KEY` in der `docker-compose.yml` **unbedingt** vor dem
-  Produktivbetrieb auf einen langen, zufälligen Wert ändern
+- `DBM_SECRET_KEY` ist **optional**: wird sie nicht gesetzt, erzeugt der
+  Container beim ersten Start automatisch einen zufälligen Schlüssel und
+  speichert ihn als `.secret_key` im Datenvolume (`/data`) — Sessions bleiben
+  damit auch ohne manuelle Konfiguration sicher und überleben Neustarts. Wer
+  mehrere Repliken desselben Volumes betreibt oder den Schlüssel selbst
+  kontrollieren will, kann `DBM_SECRET_KEY` weiterhin explizit setzen.
+- Nach 5 falschen Login-Versuchen wird der Account für 5 Minuten gesperrt
+  (konfigurierbar über `DBM_LOGIN_MAX_ATTEMPTS` / `DBM_LOGIN_LOCKOUT_SECONDS`),
+  um Passwort-Brute-Force zu erschweren.
+- Admin-Passwort vergessen? Direkt im laufenden Container zurücksetzen (legt
+  den Nutzer bei Bedarf auch neu an):
+  ```bash
+  docker exec -it <container-name> python -m app.reset_password admin einneuespasswort123
+  ```
 - `DBM_ENCRYPTION_KEY` setzen, um Backups at-rest zu verschlüsseln (siehe oben)
   — besonders relevant, wenn Backups auf externe Speicherziele hochgeladen werden
+- Wird die Web-UI hinter TLS (Reverse-Proxy) betrieben, empfiehlt sich
+  zusätzlich `DBM_SESSION_HTTPS_ONLY=true`, damit das Session-Cookie nur noch
+  per HTTPS übertragen wird.
 - Der Container benötigt Zugriff auf den Docker-Socket — das entspricht
   faktisch Root-Rechten auf dem Host. Nur auf vertrauenswürdigen Hosts
   betreiben und die Web-UI nicht ungeschützt ins Internet stellen (ggf.

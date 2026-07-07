@@ -7,8 +7,14 @@ services:
     ports:
       - "8420:8420"
     environment:
-      # Change this in production - it signs session cookies.
-      DBM_SECRET_KEY: "please-change-this-to-a-long-random-string"
+      # Optional: signs session cookies. If unset, a random key is generated
+      # on first start and persisted as /data/.secret_key - only set this
+      # explicitly if you need a stable, self-chosen key (e.g. multiple
+      # replicas sharing one volume).
+      # DBM_SECRET_KEY: "please-change-this-to-a-long-random-string"
+      # Optional: set true if this is served behind HTTPS (reverse proxy),
+      # so the session cookie is only ever sent over an encrypted connection.
+      # DBM_SESSION_HTTPS_ONLY: "true"
       # Optional but recommended: encrypts backups at rest (AES-256). Generate
       # with `openssl rand -base64 32` and keep it safe - losing it makes
       # existing backups permanently unrecoverable.

@@ -6,7 +6,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
 from app import scheduler
-from app.config import SECRET_KEY, SESSION_COOKIE_NAME, SESSION_MAX_AGE
+from app.config import SECRET_KEY, SESSION_COOKIE_NAME, SESSION_HTTPS_ONLY, SESSION_MAX_AGE
 from app.database import init_db
 from app.routers import auth, backups, containers, jobs, schedules, settings
 
@@ -20,6 +20,7 @@ app.add_middleware(
     session_cookie=SESSION_COOKIE_NAME,
     max_age=SESSION_MAX_AGE,
     same_site="lax",
+    https_only=SESSION_HTTPS_ONLY,
 )
 
 app.include_router(auth.router)

@@ -1,8 +1,11 @@
+import datetime
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.auth import any_user_exists, get_current_user, hash_password, verify_password
+from app.config import LOGIN_LOCKOUT_SECONDS, LOGIN_MAX_ATTEMPTS
 from app.database import get_db
 from app.models import User
 from fastapi import Request
@@ -42,8 +45,22 @@ def setup(payload: SetupPayload, request: Request, db: Session = Depends(get_db)
 @router.post("/login")
 def login(payload: LoginPayload, request: Request, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.username == payload.username).first()
+
+    if user and user.locked_until and user.locked_until > datetime.datetime.utcnow():
+        raise HTTPException(429, "Too many failed attempts, try again later")
+
     if not user or not verify_password(payload.password, user.password_hash):
+        if user:
+            user.failed_attempts += 1
+            if user.failed_attempts >= LOGIN_MAX_ATTEMPTS:
+                user.locked_until = datetime.datetime.utcnow() + datetime.timedelta(seconds=LOGIN_LOCKOUT_SECONDS)
+                user.failed_attempts = 0
+            db.commit()
         raise HTTPException(401, "Invalid credentials")
+
+    user.failed_attempts = 0
+    user.locked_until = None
+    db.commit()
     request.session["user_id"] = user.id
     return {"ok": True}
 
