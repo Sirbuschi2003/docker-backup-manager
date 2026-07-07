@@ -23,11 +23,12 @@ class Job:
     total_steps: int = 1
     current_step: int = 0
     step_name: str = "starting"
-    status: str = "running"  # running | success | failed
+    status: str = "running"  # running | success | failed | cancelling | cancelled
     error: Optional[str] = None
     result_backup_id: Optional[int] = None
     started_at: float = field(default_factory=time.time)
     finished_at: Optional[float] = None
+    cancel_requested: bool = False
 
     def to_dict(self):
         elapsed = (self.finished_at or time.time()) - self.started_at
@@ -51,6 +52,7 @@ class Job:
             "eta_seconds": eta_seconds,
             "error": self.error,
             "result_backup_id": self.result_backup_id,
+            "cancellable": self.status == "running" and not self.cancel_requested,
         }
 
 
@@ -82,6 +84,37 @@ def finish_job(job_id: str, ok: bool, error: Optional[str] = None, result_backup
         job.result_backup_id = result_backup_id
         job.finished_at = time.time()
         job.current_step = job.total_steps if ok else job.current_step
+
+
+def cancel_job(job_id: str, message: str = "Vom Nutzer abgebrochen"):
+    """Marks a job as cancelled once the running operation has actually
+    stopped (called by the job runner after catching a BackupCancelled)."""
+    with _lock:
+        job = _jobs.get(job_id)
+        if not job:
+            return
+        job.status = "cancelled"
+        job.error = message
+        job.finished_at = time.time()
+
+
+def request_cancel(job_id: str) -> bool:
+    """Signals a running job to stop at its next checkpoint (cooperative -
+    the job itself has to poll is_cancel_requested()). Returns False if the
+    job doesn't exist or isn't running."""
+    with _lock:
+        job = _jobs.get(job_id)
+        if not job or job.status != "running":
+            return False
+        job.cancel_requested = True
+        job.status = "cancelling"
+        return True
+
+
+def is_cancel_requested(job_id: str) -> bool:
+    with _lock:
+        job = _jobs.get(job_id)
+        return bool(job and job.cancel_requested)
 
 
 def get_job(job_id: str) -> Optional[Job]:

@@ -70,13 +70,20 @@ function ensureJobTray() {
   return jobTrayEl;
 }
 
+function _jobStatusBadge(status) {
+  if (status === "running") return { cls: "running", label: "läuft" };
+  if (status === "cancelling") return { cls: "running", label: "wird abgebrochen…" };
+  if (status === "cancelled") return { cls: "neutral", label: "abgebrochen" };
+  if (status === "success") return { cls: "ok", label: "fertig" };
+  return { cls: "failed", label: "fehlgeschlagen" };
+}
+
 function renderJobCard(job) {
-  const statusBadge = job.status === "running" ? "running" : job.status === "success" ? "ok" : "failed";
-  const statusLabel = job.status === "running" ? "läuft" : job.status === "success" ? "fertig" : "fehlgeschlagen";
-  return h(`
+  const { cls, label } = _jobStatusBadge(job.status);
+  const card = h(`
     <div class="card job-card" data-job-id="${job.id}">
       <div class="job-title"><span>${job.kind === "backup" ? "💾" : "♻️"} ${job.label}</span>
-        <span class="badge ${statusBadge}">${statusLabel}</span></div>
+        <span class="badge ${cls}">${label}</span></div>
       <div class="muted job-step" style="font-size:.8rem">${job.step_name}</div>
       <div class="progress-wrap">
         <div class="progress-bar"><div style="width:${job.percent}%"></div></div>
@@ -88,16 +95,34 @@ function renderJobCard(job) {
         </div>
       </div>
       ${job.error ? `<div class="error-msg">${job.error}</div>` : ""}
+      ${job.cancellable ? `<div class="row-actions" style="margin-top:8px;"><button type="button" class="btn danger job-cancel-btn" style="padding:4px 10px; font-size:.8rem;">Abbrechen</button></div>` : ""}
     </div>
   `);
+  _wireJobCancelButton(card, job.id);
+  return card;
+}
+
+function _wireJobCancelButton(card, jobId) {
+  const btn = card.querySelector(".job-cancel-btn");
+  if (!btn) return;
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    btn.textContent = "Breche ab…";
+    try {
+      await api(`/api/jobs/${jobId}/cancel`, { method: "POST" });
+    } catch (e) {
+      toast(e.message, "error");
+      btn.disabled = false;
+      btn.textContent = "Abbrechen";
+    }
+  });
 }
 
 function updateJobCard(card, job) {
-  const statusBadge = job.status === "running" ? "running" : job.status === "success" ? "ok" : "failed";
-  const statusLabel = job.status === "running" ? "läuft" : job.status === "success" ? "fertig" : "fehlgeschlagen";
+  const { cls, label } = _jobStatusBadge(job.status);
   const badge = card.querySelector(".badge");
-  badge.className = `badge ${statusBadge}`;
-  badge.textContent = statusLabel;
+  badge.className = `badge ${cls}`;
+  badge.textContent = label;
   card.querySelector(".job-step").textContent = job.step_name;
   card.querySelector(".progress-bar > div").style.width = `${job.percent}%`;
   card.querySelector(".job-step-count").textContent = `Schritt ${job.current_step}/${job.total_steps}`;
@@ -111,6 +136,14 @@ function updateJobCard(card, job) {
     existingError.textContent = job.error;
   } else if (!job.error && existingError) {
     existingError.remove();
+  }
+  const existingCancelWrap = card.querySelector(".job-cancel-btn")?.closest(".row-actions");
+  if (job.cancellable && !existingCancelWrap) {
+    const wrap = h(`<div class="row-actions" style="margin-top:8px;"><button type="button" class="btn danger job-cancel-btn" style="padding:4px 10px; font-size:.8rem;">Abbrechen</button></div>`);
+    card.appendChild(wrap);
+    _wireJobCancelButton(card, job.id);
+  } else if (!job.cancellable && existingCancelWrap) {
+    existingCancelWrap.remove();
   }
 }
 

@@ -297,7 +297,12 @@ da die Backup/Restore-Funktionen die Docker-API benötigen.
 Bei manuell ausgelösten Backups („Backup jetzt“, „Gesamte Landschaft sichern“)
 werden alle aktivierten Speicherziele synchronisiert; bei Zeitplänen nur die
 dort ausgewählten. Der Fortschritt aller laufenden Backup-/Restore-/Sync-Jobs
-erscheint als Ladebalken unten links auf jeder Seite der App.
+erscheint als Ladebalken unten links auf jeder Seite der App. Ein laufendes
+Backup kann dort jederzeit über den „Abbrechen“-Button gestoppt werden — der
+Job läuft bis zum nächsten sicheren Checkpoint weiter (z. B. bis das aktuelle
+Volume fertig kopiert ist), bricht dann sauber ab und räumt bereits
+angelegte, aber unvollständige Backup-Verzeichnisse auf. Ein echtes
+Pause/Fortsetzen gibt es nicht, nur Abbrechen.
 
 ### Volumes direkt streamen (ohne lokalen Speicherbedarf)
 

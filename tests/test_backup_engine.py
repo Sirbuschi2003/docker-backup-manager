@@ -49,6 +49,24 @@ def test_iter_volume_tar_chunks_yields_container_stdout(monkeypatch):
     container.remove.assert_called_once_with(force=True)
 
 
+def test_iter_volume_tar_chunks_stops_and_cleans_up_on_cancel(monkeypatch):
+    container = _fake_helper_container([b"chunk1", b"chunk2", b"chunk3"])
+    client = MagicMock()
+    client.containers.run.return_value = container
+    monkeypatch.setattr(backup_engine, "get_client", lambda: client)
+
+    seen = []
+    # Cancel right after the first chunk is read.
+    should_cancel = lambda: len(seen) >= 1  # noqa: E731
+
+    with pytest.raises(backup_engine.BackupCancelled):
+        for chunk in backup_engine.iter_volume_tar_chunks("some-volume", should_cancel=should_cancel):
+            seen.append(chunk)
+
+    assert seen == [b"chunk1"]
+    container.remove.assert_called_once_with(force=True)
+
+
 def test_iter_volume_tar_chunks_raises_on_nonzero_exit(monkeypatch):
     container = _fake_helper_container([b"partial"], status_code=1)
     client = MagicMock()
@@ -195,6 +213,69 @@ def test_backup_landscape_uses_name_contains_as_fallback_label(tmp_path: Path, m
     assert (tmp_path / "_landscapes" / "nextcloud-aio").exists()
 
 
+def test_backup_container_stops_at_next_checkpoint_when_cancelled(tmp_path: Path, monkeypatch):
+    container = MagicMock()
+    container.name = "app"
+    container.attrs = {
+        "Mounts": [
+            {"Type": "volume", "Name": "vol-a"},
+            {"Type": "volume", "Name": "vol-b"},
+        ],
+        "NetworkSettings": {"Networks": {}},
+        "Config": {"Image": "app:latest"},
+    }
+    container.image.save.return_value = iter([b"image-bytes"])
+
+    client = MagicMock()
+    client.containers.get.return_value = container
+    client.version.return_value = {"ApiVersion": "1.45"}
+    client.containers.run.side_effect = lambda image, command=None, volumes=None, detach=None: _fake_helper_container([b"data"])
+    monkeypatch.setattr(backup_engine, "get_client", lambda: client)
+
+    # Cancel once we reach the second volume - vol-a should already be archived.
+    archived = []
+    real_backup_volume_to_file = backup_engine.backup_volume_to_file
+
+    def tracking_backup_volume_to_file(volume_name, dest, should_cancel=backup_engine._never_cancel):
+        archived.append(volume_name)
+        real_backup_volume_to_file(volume_name, dest, should_cancel=should_cancel)
+
+    monkeypatch.setattr(backup_engine, "backup_volume_to_file", tracking_backup_volume_to_file)
+    should_cancel = lambda: len(archived) >= 1  # noqa: E731
+
+    result = backup_engine.backup_container("app", dest_root=tmp_path, should_cancel=should_cancel)
+
+    assert result.cancelled is True
+    assert result.ok is False
+    assert not result.path.exists()  # cleaned up, same as any other failure
+    assert archived == ["vol-a"]  # never got to vol-b
+
+
+def test_backup_landscape_stops_after_a_cancelled_member(tmp_path: Path, monkeypatch):
+    container_a = MagicMock(name="a")
+    container_a.name = "app-a"
+    container_b = MagicMock(name="b")
+    container_b.name = "app-b"
+    monkeypatch.setattr(backup_engine, "list_landscape_containers",
+                         lambda project_filter=None, name_contains=None: [container_a, container_b])
+
+    cancelled_result = BackupResult(ok=False, name="app-a", path=tmp_path / "app-a" / "v1",
+                                     error="Backup abgebrochen", cancelled=True)
+    calls = []
+
+    def fake_backup_container(name, dest_root, stream_target=None, should_cancel=None):
+        calls.append(name)
+        return cancelled_result
+
+    monkeypatch.setattr(backup_engine, "backup_container", fake_backup_container)
+
+    result = backup_engine.backup_landscape(dest_root=tmp_path, should_cancel=lambda: False)
+
+    assert calls == ["app-a"]  # stopped immediately after the cancelled member, never reached app-b
+    assert result.cancelled is True
+    assert result.ok is False
+
+
 def test_backup_landscape_carries_member_results_for_tracking(tmp_path: Path, monkeypatch):
     container_a = MagicMock(name="a")
     container_a.name = "app-a"
@@ -208,7 +289,7 @@ def test_backup_landscape_carries_member_results_for_tracking(tmp_path: Path, mo
         "app-b": BackupResult(ok=False, name="app-b", path=tmp_path / "app-b" / "v1", error="boom"),
     }
     monkeypatch.setattr(backup_engine, "backup_container",
-                         lambda name, dest_root, stream_target=None: canned_results[name])
+                         lambda name, dest_root, stream_target=None, should_cancel=None: canned_results[name])
 
     result = backup_engine.backup_landscape(dest_root=tmp_path)
 

@@ -92,9 +92,10 @@ def _run_landscape_job(job_id: str, label: Optional[str], project_filter: Option
             job_tracker.update_progress(job_id, step, name, total)
 
         stream_target = storage_sync.resolve_stream_target(db, stream_volumes_target_id)
-        result = backup_engine.backup_landscape(BACKUPS_DIR, project_filter=project_filter,
-                                                  label=label, on_progress=progress,
-                                                  stream_target=stream_target)
+        result = backup_engine.backup_landscape(
+            BACKUPS_DIR, project_filter=project_filter, label=label, on_progress=progress,
+            stream_target=stream_target, should_cancel=lambda: job_tracker.is_cancel_requested(job_id),
+        )
         record = BackupRecord(
             backup_type="landscape",
             name=result.name,
@@ -133,7 +134,10 @@ def _run_landscape_job(job_id: str, label: Optional[str], project_filter: Option
             record.synced_target_ids = json.dumps([r["target_id"] for r in sync_results if r["ok"]])
             db.commit()
 
-        job_tracker.finish_job(job_id, result.ok, result.error, record.id)
+        if result.cancelled:
+            job_tracker.cancel_job(job_id)
+        else:
+            job_tracker.finish_job(job_id, result.ok, result.error, record.id)
     except Exception as exc:  # noqa: BLE001
         job_tracker.finish_job(job_id, False, str(exc))
     finally:

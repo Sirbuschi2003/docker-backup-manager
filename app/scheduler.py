@@ -37,14 +37,15 @@ def run_schedule(schedule_id: int):
 
         try:
             stream_target = storage_sync.resolve_stream_target(db, sched.stream_volumes_target_id)
+            should_cancel = lambda: job_tracker.is_cancel_requested(job.id)  # noqa: E731
             if sched.target_type == "container":
                 result = backup_engine.backup_container(sched.target_ref, BACKUPS_DIR, on_progress=progress,
-                                                          stream_target=stream_target)
+                                                          stream_target=stream_target, should_cancel=should_cancel)
             else:
                 result = backup_engine.backup_landscape(BACKUPS_DIR, project_filter=sched.project_filter,
                                                           name_contains=sched.name_contains,
                                                           label=sched.name, on_progress=progress,
-                                                          stream_target=stream_target)
+                                                          stream_target=stream_target, should_cancel=should_cancel)
 
             record = BackupRecord(
                 backup_type=sched.target_type,
@@ -81,12 +82,15 @@ def run_schedule(schedule_id: int):
                 record.synced_target_ids = json.dumps([r["target_id"] for r in sync_results if r["ok"]])
                 db.commit()
 
-            job_tracker.finish_job(job.id, result.ok, result.error, record.id)
+            if result.cancelled:
+                job_tracker.cancel_job(job.id)
+            else:
+                job_tracker.finish_job(job.id, result.ok, result.error, record.id)
 
             _apply_retention(db, sched)
 
             sched.last_run_at = datetime.datetime.utcnow()
-            sched.last_status = "ok" if result.ok else "failed"
+            sched.last_status = "cancelled" if result.cancelled else ("ok" if result.ok else "failed")
             db.commit()
         except Exception as exc:  # noqa: BLE001
             logger.exception("Scheduled backup failed")

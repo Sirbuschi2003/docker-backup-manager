@@ -35,3 +35,38 @@ def test_list_jobs_active_only_filters_running():
     active_ids = {j.id for j in job_tracker.list_jobs(active_only=True)}
     assert j1.id in active_ids
     assert j2.id not in active_ids
+
+
+def test_request_cancel_marks_job_cancelling_and_sets_flag():
+    job = job_tracker.create_job("backup", "app")
+    assert job_tracker.is_cancel_requested(job.id) is False
+
+    assert job_tracker.request_cancel(job.id) is True
+    assert job_tracker.is_cancel_requested(job.id) is True
+    assert job_tracker.get_job(job.id).status == "cancelling"
+    assert job_tracker.get_job(job.id).to_dict()["cancellable"] is False
+
+
+def test_request_cancel_fails_for_already_finished_job():
+    job = job_tracker.create_job("backup", "app")
+    job_tracker.finish_job(job.id, ok=True)
+    assert job_tracker.request_cancel(job.id) is False
+
+
+def test_request_cancel_fails_for_unknown_job():
+    assert job_tracker.request_cancel("does-not-exist") is False
+
+
+def test_cancel_job_sets_cancelled_status():
+    job = job_tracker.create_job("backup", "app")
+    job_tracker.request_cancel(job.id)
+    job_tracker.cancel_job(job.id)
+    d = job_tracker.get_job(job.id).to_dict()
+    assert d["status"] == "cancelled"
+    assert d["error"] == "Vom Nutzer abgebrochen"
+    assert d["cancellable"] is False
+
+
+def test_running_job_is_cancellable_in_to_dict():
+    job = job_tracker.create_job("backup", "app")
+    assert job.to_dict()["cancellable"] is True
