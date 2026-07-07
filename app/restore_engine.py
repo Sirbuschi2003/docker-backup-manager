@@ -123,10 +123,11 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
 
     meta = json.loads((backup_dir / "meta.json").read_text()) if (backup_dir / "meta.json").exists() else {}
     streamed_target_id = meta.get("streamed_target_id")
+    bind_mounts_meta = meta.get("bind_mounts", [])
 
     if streamed_target_id is not None:
-        # Volumes were never written locally - each one has to be fetched from
-        # the target it was streamed to before it can be restored.
+        # Volumes/binds were never written locally - each one has to be
+        # fetched from the target it was streamed to before it can be restored.
         if not stream_target:
             raise RuntimeError(
                 "Dieses Backup wurde direkt zu einem Speicherziel gestreamt, aber das Ziel ist nicht "
@@ -145,12 +146,22 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
                 target_type, target_config_json, f"{relative_key}/volumes/{sanitize_name(vol_name)}.tar.gz", dest,
             )
             volume_files.append(dest)
+        bind_files = []
+        for bind in bind_mounts_meta:
+            dest = stage_dir / bind["filename"]
+            storage_sync.download_from_target(
+                target_type, target_config_json, f"{relative_key}/binds/{bind['filename']}", dest,
+            )
+            bind_files.append((bind["source"], dest))
     else:
         stage_dir_ctx = None
         volume_files = sorted((backup_dir / "volumes").glob("*.tar.gz")) if (backup_dir / "volumes").exists() else []
+        binds_dir = backup_dir / "binds"
+        bind_files = [(bind["source"], binds_dir / bind["filename"]) for bind in bind_mounts_meta
+                      if (binds_dir / bind["filename"]).exists()]
 
     try:
-        total_steps = 3 + len(volume_files)
+        total_steps = 3 + len(volume_files) + len(bind_files)
         step = 1
 
         on_progress(step, "Loading image", total_steps)
@@ -175,6 +186,15 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
             if vol_name not in existing_volumes:
                 client.volumes.create(name=vol_name)
             restore_volume_from_file(vol_name, vol_file)
+
+        for source, bind_file in bind_files:
+            step += 1
+            on_progress(step, f"Restoring bind mount {source}", total_steps)
+            # Extracting into `source` (a host path, not a Docker volume name)
+            # works the same way restore_volume_from_file already bind-mounts
+            # a host path for named volumes - Docker auto-creates the host
+            # directory if it doesn't exist yet.
+            restore_volume_from_file(source, bind_file)
     finally:
         if stage_dir_ctx is not None:
             stage_dir_ctx.cleanup()

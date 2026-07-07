@@ -15,8 +15,12 @@ purem Docker Engine auf Linux.
 
 - **Backup einzelner Container** oder der **gesamten Docker-Landschaft** (alle
   Container oder gefiltert nach Compose-Projekt)
-- Backup enthält: Image (`docker save`), alle benannten Volumes, angehängte
-  Custom-Netzwerke und die vollständige Container-Konfiguration
+- Backup enthält: Image (`docker save`), alle benannten Volumes, **Bind-Mounts**
+  (Host-Ordner, die direkt in den Container eingehängt sind, z. B. ein
+  Nextcloud-Datenordner auf einer separaten Platte — nicht nur der Verweis
+  darauf, sondern die tatsächlichen Daten), angehängte Custom-Netzwerke und
+  die vollständige Container-Konfiguration. Docker-interne Bind-Mounts wie
+  der Docker-Socket werden automatisch ausgeschlossen.
 - **Wiederherstellung** auf demselben oder einem anderen Host/OS
 - **Zeitbasierte Versionierung**: jedes Backup ist eine eigene Zeitstempel-Version,
   nichts wird überschrieben
@@ -69,6 +73,7 @@ purem Docker Engine auf Linux.
     image.tar             `docker save` des Images
     networks.json         Konfiguration angehängter Custom-Netzwerke
     volumes/<name>.tar.gz  Inhalt jedes benannten Volumes
+    binds/<pfad>.tar.gz    Inhalt jedes Bind-Mounts (Host-Ordner im Container)
 ```
 
 Ein Landschafts-Backup ist einfach eine Sammlung solcher Container-Backups plus

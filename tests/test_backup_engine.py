@@ -102,6 +102,60 @@ def test_backup_container_removes_partial_dir_on_failure(tmp_path: Path, monkeyp
     assert not result.path.exists()  # partial data must not linger and inflate disk usage
 
 
+def test_should_backup_bind_mount_skips_docker_internals():
+    assert backup_engine._should_backup_bind_mount("/var/run/docker.sock") is False
+    assert backup_engine._should_backup_bind_mount("/proc") is False
+    assert backup_engine._should_backup_bind_mount("/proc/1/ns") is False
+    assert backup_engine._should_backup_bind_mount("/sys/fs/cgroup") is False
+    assert backup_engine._should_backup_bind_mount("/some/other.sock") is False
+
+
+def test_should_backup_bind_mount_allows_real_data_paths():
+    assert backup_engine._should_backup_bind_mount("/mnt/bigdisk/nextcloud-data") is True
+    assert backup_engine._should_backup_bind_mount("/srv/app-config") is True
+
+
+def test_backup_container_archives_bind_mounts_and_skips_denylisted_ones(tmp_path: Path, monkeypatch):
+    container = MagicMock()
+    container.name = "nextcloud"
+    container.attrs = {
+        "Mounts": [
+            {"Type": "volume", "Name": "nc-db"},
+            {"Type": "bind", "Source": "/mnt/bigdisk/nextcloud-data", "Destination": "/var/www/html/data", "RW": True},
+            {"Type": "bind", "Source": "/var/run/docker.sock", "Destination": "/var/run/docker.sock", "RW": True},
+        ],
+        "NetworkSettings": {"Networks": {}},
+        "Config": {"Image": "nextcloud:latest"},
+    }
+    container.image.save.return_value = iter([b"image-bytes"])
+
+    client = MagicMock()
+    client.containers.get.return_value = container
+    client.version.return_value = {"ApiVersion": "1.45"}
+
+    def fake_helper_run(image, command=None, volumes=None, detach=None):
+        # volumes has exactly one key: the volume name or bind source being archived.
+        key = next(iter(volumes))
+        content = f"data-for-{key}".encode()
+        return _fake_helper_container([content])
+
+    client.containers.run.side_effect = fake_helper_run
+    monkeypatch.setattr(backup_engine, "get_client", lambda: client)
+
+    result = backup_engine.backup_container("nextcloud", dest_root=tmp_path)
+
+    assert result.ok is True
+    meta = json.loads((result.path / "meta.json").read_text())
+    assert meta["bind_mounts"] == [{
+        "source": "/mnt/bigdisk/nextcloud-data", "destination": "/var/www/html/data",
+        "filename": "_var_www_html_data.tar.gz", "rw": True,
+    }]
+    # The docker.sock bind mount must not show up anywhere - not archived, not in meta.
+    assert (result.path / "binds" / "_var_www_html_data.tar.gz").read_bytes() == b"data-for-/mnt/bigdisk/nextcloud-data"
+    assert not (result.path / "binds" / "var_run_docker.sock.tar.gz").exists()
+    assert (result.path / "volumes" / "nc-db.tar.gz").exists()
+
+
 def test_backup_landscape_carries_member_results_for_tracking(tmp_path: Path, monkeypatch):
     container_a = MagicMock(name="a")
     container_a.name = "app-a"

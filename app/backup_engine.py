@@ -11,6 +11,11 @@ Layout of a container backup version folder:
       image.tar            -> `docker save` of the container's image
       networks.json        -> attrs of every custom network the container was attached to
       volumes/<vol>.tar.gz  -> tar of each named volume's data
+      binds/<dest>.tar.gz    -> tar of each bind-mounted host directory's data
+                                (e.g. a Nextcloud data dir living on a separate
+                                disk) - skipped for a denylist of Docker/system
+                                internals like the docker.sock (see
+                                _should_backup_bind_mount)
 """
 from __future__ import annotations
 
@@ -75,6 +80,24 @@ def dir_size_bytes(path: Path) -> int:
 
 def sanitize_name(name: str) -> str:
     return "".join(c if c.isalnum() or c in ("-", "_", ".") else "_" for c in name)
+
+
+# Bind mounts that reference Docker/system internals rather than actual
+# application data - archiving these would be meaningless (sockets aren't
+# regular files) or pointlessly huge (/proc, /sys, /dev). Everything else a
+# container bind-mounts (e.g. a data directory on a separate disk) is
+# real data and gets backed up like a named volume.
+_SKIP_BIND_MOUNT_SOURCES = {"/var/run/docker.sock", "/proc", "/sys", "/dev"}
+
+
+def _should_backup_bind_mount(source: str) -> bool:
+    if source in _SKIP_BIND_MOUNT_SOURCES:
+        return False
+    if source.endswith(".sock"):
+        return False
+    if source.startswith(("/proc/", "/sys/", "/dev/")):
+        return False
+    return True
 
 
 def iter_volume_tar_chunks(volume_name: str) -> Iterator[bytes]:
@@ -156,8 +179,13 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
     backup_dir = dest_root / sanitize_name(name) / ts
 
     volume_mounts = [m for m in attrs.get("Mounts", []) if m.get("Type") == "volume"]
+    bind_mounts = [
+        m for m in attrs.get("Mounts", [])
+        if m.get("Type") == "bind" and _should_backup_bind_mount(m.get("Source", ""))
+    ]
     encrypt = encryption.is_enabled()
-    total_steps = 3 + len(volume_mounts) + (1 if encrypt else 0)  # inspect+networks, image, finalize, one per volume, optional encrypt
+    # inspect+networks, image, finalize, one per volume, one per bind mount, optional encrypt
+    total_steps = 3 + len(volume_mounts) + len(bind_mounts) + (1 if encrypt else 0)
 
     try:
         backup_dir.mkdir(parents=True, exist_ok=False)
@@ -204,6 +232,26 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
                 on_progress(step, f"Archiving volume {vol_name}", total_steps)
                 backup_volume_to_file(vol_name, volumes_dir / vol_filename)
 
+        binds_dir = backup_dir / "binds"
+        bind_mounts_meta = []
+        for mount in bind_mounts:
+            source = mount["Source"]
+            destination = mount["Destination"]
+            step += 1
+            bind_filename = f"{sanitize_name(destination)}.tar.gz"
+            bind_mounts_meta.append({
+                "source": source, "destination": destination, "filename": bind_filename,
+                "rw": mount.get("RW", True),
+            })
+            if stream_target:
+                target_type, target_config_json, _target_id = stream_target
+                on_progress(step, f"Streaming bind mount {destination} to storage target", total_steps)
+                relative_path = f"{sanitize_name(name)}/{ts}/binds/{bind_filename}"
+                stream_volume_to_target(source, target_type, target_config_json, relative_path)
+            else:
+                on_progress(step, f"Archiving bind mount {destination}", total_steps)
+                backup_volume_to_file(source, binds_dir / bind_filename)
+
         step += 1
         on_progress(step, "Finalizing", total_steps)
         meta = {
@@ -212,6 +260,7 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
             "container_name": name,
             "image": image_tag,
             "volumes": volume_names,
+            "bind_mounts": bind_mounts_meta,
             "created_at": datetime.datetime.utcnow().isoformat() + "Z",
             "docker_api_version": client.version().get("ApiVersion"),
             "streamed_target_id": stream_target[2] if stream_target else None,

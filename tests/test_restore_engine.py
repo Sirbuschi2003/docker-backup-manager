@@ -159,6 +159,39 @@ def test_restore_container_bulk_downloads_a_catalog_imported_backup(tmp_path, mo
     client.volumes.create.assert_called_once_with(name="data-vol")
 
 
+def test_restore_container_restores_bind_mounts_from_local_backup(tmp_path, monkeypatch):
+    import app.restore_engine as restore_engine
+
+    backup_dir = tmp_path / "backups" / "nextcloud" / "v1"
+    (backup_dir / "binds").mkdir(parents=True)
+    (backup_dir / "container.json").write_text(json.dumps({"Name": "/nextcloud", "Config": {}, "HostConfig": {}}))
+    (backup_dir / "image.tar").write_bytes(b"fake-image-tar")
+    (backup_dir / "meta.json").write_text(json.dumps({
+        "volumes": [],
+        "bind_mounts": [{
+            "source": "/mnt/bigdisk/nextcloud-data", "destination": "/var/www/html/data",
+            "filename": "_var_www_html_data.tar.gz", "rw": True,
+        }],
+    }))
+    (backup_dir / "binds" / "_var_www_html_data.tar.gz").write_bytes(b"200gb-of-nextcloud-data")
+
+    client = MagicMock()
+    loaded_image = MagicMock()
+    loaded_image.tags = ["nextcloud:latest"]
+    client.images.load.return_value = [loaded_image]
+    client.networks.list.return_value = []
+    client.volumes.list.return_value = []
+    monkeypatch.setattr(restore_engine, "get_client", lambda: client)
+
+    restored = {}
+    monkeypatch.setattr(restore_engine, "restore_volume_from_file",
+                         lambda source, file: restored.__setitem__(source, Path(file).read_bytes()))
+
+    restore_container(backup_dir)
+
+    assert restored == {"/mnt/bigdisk/nextcloud-data": b"200gb-of-nextcloud-data"}
+
+
 def test_restore_container_raises_clearly_if_missing_locally_and_no_target(tmp_path, monkeypatch):
     import app.restore_engine as restore_engine
 
