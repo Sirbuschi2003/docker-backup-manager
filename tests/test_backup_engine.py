@@ -21,6 +21,33 @@ def test_dir_size_bytes(tmp_path: Path):
     assert dir_size_bytes(tmp_path) == 11
 
 
+def test_backup_volume_to_file_stages_under_backups_dir(tmp_path: Path, monkeypatch):
+    from app.config import BACKUPS_DIR
+
+    captured = {}
+
+    def fake_run(image, command=None, volumes=None, remove=None):
+        # Simulate what the real helper container would do: write the archive
+        # into whichever host path was bind-mounted at /backup.
+        captured["volumes"] = volumes
+        host_backup_path = next(k for k, v in volumes.items() if v["bind"] == "/backup")
+        (Path(host_backup_path) / "archive.tar.gz").write_bytes(b"fake-tar-data")
+
+    client = MagicMock()
+    client.containers.run.side_effect = fake_run
+    monkeypatch.setattr(backup_engine, "get_client", lambda: client)
+
+    dest = tmp_path / "vol.tar.gz"
+    backup_engine.backup_volume_to_file("some-volume", dest)
+
+    assert dest.read_bytes() == b"fake-tar-data"
+    host_backup_path = next(k for k, v in captured["volumes"].items() if v["bind"] == "/backup")
+    # Must be under BACKUPS_DIR (bind-mounted from the host) so the Docker
+    # daemon and this container resolve the same real directory - not under
+    # the system temp dir, which only exists inside this container.
+    assert Path(host_backup_path).resolve().is_relative_to(BACKUPS_DIR.resolve())
+
+
 def test_backup_container_removes_partial_dir_on_failure(tmp_path: Path, monkeypatch):
     container = MagicMock()
     container.name = "failing-app"

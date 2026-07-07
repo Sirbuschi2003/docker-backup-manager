@@ -22,6 +22,8 @@ from cryptography.hazmat.primitives import hashes, hmac, padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
+from app.config import BACKUPS_DIR
+
 ENCRYPTED_SUFFIX = ".enc"
 CHUNK_SIZE = 1024 * 1024
 _HKDF_INFO = b"docker-backup-manager-v1"
@@ -179,8 +181,17 @@ def is_backup_encrypted(root: Path) -> bool:
 def decrypt_directory_to_temp(root: Path) -> tempfile.TemporaryDirectory:
     """Returns a TemporaryDirectory whose contents mirror `root` with every
     `*.enc` file decrypted back to its original name. Caller must use it as a
-    context manager (or call .cleanup()) so plaintext never lingers on disk."""
-    tmp = tempfile.TemporaryDirectory(prefix="dbm-decrypt-")
+    context manager (or call .cleanup()) so plaintext never lingers on disk.
+
+    Staged under BACKUPS_DIR rather than the system temp dir: this app talks to
+    the Docker daemon over the host's docker.sock, so restoring a volume from
+    here bind-mounts this path into a helper container - the daemon resolves
+    that path against the *host* filesystem, not this container's own. Only
+    BACKUPS_DIR is actually bind-mounted from the host (see docker-compose.yml),
+    so a temp dir under it is the only location both sides can see the same way."""
+    staging_root = BACKUPS_DIR / ".tmp"
+    staging_root.mkdir(parents=True, exist_ok=True)
+    tmp = tempfile.TemporaryDirectory(dir=staging_root, prefix="dbm-decrypt-")
     tmp_root = Path(tmp.name)
     for path in root.rglob("*"):
         if path.is_dir():

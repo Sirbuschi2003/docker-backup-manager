@@ -121,3 +121,9 @@ def test_encrypt_directory_in_place_and_detect(enable_encryption, tmp_path: Path
         tmp_root = Path(tmp_dir)
         assert (tmp_root / "meta.json").read_text() == '{"a": 1}'
         assert (tmp_root / "volumes" / "vol.tar.gz").exists()
+        # Must be staged under BACKUPS_DIR, not the system temp dir - restoring
+        # a volume from here bind-mounts this path into a helper container via
+        # the host's Docker daemon, which only ever sees paths under BACKUPS_DIR
+        # (bind-mounted from the host), not this container's own /tmp.
+        from app.config import BACKUPS_DIR
+        assert tmp_root.resolve().is_relative_to(BACKUPS_DIR.resolve())

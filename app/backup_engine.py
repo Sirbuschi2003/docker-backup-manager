@@ -76,7 +76,19 @@ def backup_volume_to_file(volume_name: str, dest_tar_gz: Path) -> None:
     """
     client = get_client()
     dest_tar_gz.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory() as tmp:
+    # This app talks to the Docker daemon over the host's docker.sock (it doesn't
+    # run its own nested daemon), so any bind-mount path handed to
+    # containers.run() is resolved by the daemon against the *host* filesystem,
+    # not this container's own filesystem. The default tempfile location (/tmp)
+    # only exists inside this container, so the helper container below would
+    # silently write into an unrelated, auto-created host directory instead -
+    # the resulting archive would then never be found afterwards. BACKUPS_DIR is
+    # bind-mounted from the host (see docker-compose.yml), so a temp dir under
+    # it resolves to the same real location for both this container and the
+    # daemon/helper container.
+    staging_root = BACKUPS_DIR / ".tmp"
+    staging_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=staging_root) as tmp:
         tmp_path = Path(tmp)
         client.containers.run(
             DOCKER_HELPER_IMAGE,
