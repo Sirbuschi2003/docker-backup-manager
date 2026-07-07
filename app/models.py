@@ -66,3 +66,13 @@ class Schedule(Base):
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     last_run_at = Column(DateTime, nullable=True)
     last_status = Column(String(16), nullable=True)
+
+
+class LogEntry(Base):
+    __tablename__ = "log_entries"
+
+    id = Column(Integer, primary_key=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow, index=True)
+    level = Column(String(16), nullable=False, default="info")  # info | error
+    category = Column(String(16), nullable=False)  # backup | restore | schedule
+    message = Column(Text, nullable=False)

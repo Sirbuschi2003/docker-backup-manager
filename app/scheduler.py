@@ -8,7 +8,7 @@ from pathlib import Path
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from app import backup_engine, job_tracker, storage_sync
+from app import backup_engine, event_log, job_tracker, storage_sync
 from app.config import BACKUPS_DIR, TZ_NAME
 from app.database import SessionLocal
 from app.models import BackupRecord, Schedule
@@ -31,6 +31,7 @@ def run_schedule(schedule_id: int):
             return
 
         job = job_tracker.create_job("backup", sched.name, total_steps=1)
+        event_log.log_event("schedule", f"Zeitplan „{sched.name}“ gestartet")
 
         def progress(step, name, total=None):
             job_tracker.update_progress(job.id, step, name, total)
@@ -86,8 +87,14 @@ def run_schedule(schedule_id: int):
 
             if result.cancelled:
                 job_tracker.cancel_job(job.id)
+                event_log.log_event("schedule", f"Zeitplan „{sched.name}“ abgebrochen", level="error")
             else:
                 job_tracker.finish_job(job.id, result.ok, result.error, record.id)
+                if result.ok:
+                    event_log.log_event("schedule", f"Zeitplan „{sched.name}“ erfolgreich abgeschlossen")
+                else:
+                    event_log.log_event("schedule", f"Zeitplan „{sched.name}“ fehlgeschlagen: {result.error}",
+                                         level="error")
 
             _apply_retention(db, sched)
 
@@ -97,6 +104,7 @@ def run_schedule(schedule_id: int):
         except Exception as exc:  # noqa: BLE001
             logger.exception("Scheduled backup failed")
             job_tracker.finish_job(job.id, False, str(exc))
+            event_log.log_event("schedule", f"Zeitplan „{sched.name}“ fehlgeschlagen: {exc}", level="error")
             sched.last_run_at = datetime.datetime.utcnow()
             sched.last_status = "failed"
             db.commit()

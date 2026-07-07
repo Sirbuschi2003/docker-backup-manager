@@ -273,6 +273,7 @@ const NAV_ITEMS = [
   { key: "containers", label: "Container", icon: "⚙" },
   { key: "backups", label: "Backups", icon: "⭘" },
   { key: "schedules", label: "Zeitpläne", icon: "⏰" },
+  { key: "logs", label: "Logs", icon: "📜" },
   { key: "settings", label: "Einstellungen", icon: "⚙️" },
 ];
 
@@ -318,6 +319,7 @@ async function navigate(key) {
     else if (key === "containers") content = await containersPage();
     else if (key === "backups") content = await backupsPage();
     else if (key === "schedules") content = await schedulesPage();
+    else if (key === "logs") content = await logsPage();
     else if (key === "settings") content = await settingsPage();
     render(shell(key, content));
   } catch (e) {
@@ -953,6 +955,35 @@ async function openScheduleModal(existing) {
     } catch (e) { toast(e.message, "error"); }
   });
   document.body.appendChild(overlay);
+}
+
+// ---------- Logs ----------
+const LOG_CATEGORY_LABEL = { backup: "Backup", restore: "Restore", schedule: "Zeitplan" };
+
+async function logsPage() {
+  const data = await api("/api/logs?limit=300").catch((e) => { toast(e.message, "error"); return { entries: [] }; });
+  const wrap = h(`<div>
+    <div class="page-header"><h2>Logs</h2></div>
+    <div class="card" style="padding:0">
+      <table>
+        <thead><tr><th>Zeitpunkt</th><th>Kategorie</th><th>Meldung</th></tr></thead>
+        <tbody id="logs-tbody"></tbody>
+      </table>
+    </div>
+  </div>`);
+  const tbody = wrap.querySelector("#logs-tbody");
+  if (!data.entries.length) {
+    tbody.appendChild(h(`<tr><td colspan="3"><div class="empty-state">Noch keine Log-Einträge vorhanden</div></td></tr>`));
+  }
+  data.entries.forEach((entry) => {
+    const row = h(`<tr>
+      <td class="mono">${fmtDate(entry.created_at)}</td>
+      <td><span class="badge ${entry.level === "error" ? "failed" : "ok"}">${LOG_CATEGORY_LABEL[entry.category] || entry.category}</span></td>
+      <td>${entry.message}</td>
+    </tr>`);
+    tbody.appendChild(row);
+  });
+  return wrap;
 }
 
 // ---------- Settings ----------

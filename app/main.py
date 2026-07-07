@@ -8,7 +8,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from app import scheduler
 from app.config import SECRET_KEY, SESSION_COOKIE_NAME, SESSION_HTTPS_ONLY, SESSION_MAX_AGE
 from app.database import init_db
-from app.routers import auth, backups, containers, jobs, schedules, settings
+from app.routers import auth, backups, containers, jobs, logs, schedules, settings
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -29,6 +29,7 @@ app.include_router(backups.router)
 app.include_router(schedules.router)
 app.include_router(settings.router)
 app.include_router(jobs.router)
+app.include_router(logs.router)
 
 app.mount("/assets", StaticFiles(directory=STATIC_DIR), name="assets")
 

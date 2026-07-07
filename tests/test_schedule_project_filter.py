@@ -97,6 +97,38 @@ def test_run_schedule_passes_stop_containers_to_backup_landscape(monkeypatch):
     assert captured["stop_containers"] is True
 
 
+def test_run_schedule_writes_log_entries_for_start_and_success(monkeypatch):
+    from app import event_log, scheduler
+    from app.backup_engine import BackupResult
+    from app.database import SessionLocal
+    from app.models import Schedule
+
+    db = SessionLocal()
+    try:
+        sched = Schedule(
+            name="logged-backup", target_type="landscape",
+            cron_expression="0 3 * * *", retention_count=0, retention_days=0, storage_target_ids="[]",
+        )
+        db.add(sched)
+        db.commit()
+        db.refresh(sched)
+        schedule_id = sched.id
+    finally:
+        db.close()
+
+    def fake_backup_landscape(dest_root, project_filter=None, name_contains=None, label=None, on_progress=None, stream_target=None, should_cancel=None, stop_containers=None):
+        return BackupResult(ok=True, name=label, path=dest_root / "_landscapes" / "logged" / "v1", size_bytes=1)
+
+    monkeypatch.setattr(scheduler.backup_engine, "backup_landscape", fake_backup_landscape)
+    monkeypatch.setattr(scheduler.storage_sync, "sync_to_selected_targets", lambda *a, **k: [])
+
+    scheduler.run_schedule(schedule_id)
+
+    messages = [e.message for e in event_log.list_entries(limit=50)]
+    assert any("logged-backup" in m and "gestartet" in m for m in messages)
+    assert any("logged-backup" in m and "erfolgreich" in m for m in messages)
+
+
 def test_run_schedule_passes_name_contains_to_backup_landscape(monkeypatch):
     from app import scheduler
     from app.backup_engine import BackupResult

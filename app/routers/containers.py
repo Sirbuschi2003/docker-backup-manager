@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app import backup_engine, job_tracker, storage_sync
+from app import backup_engine, event_log, job_tracker, storage_sync
 from app.auth import get_current_user
 from app.config import BACKUPS_DIR
 from app.database import SessionLocal, get_db
@@ -46,6 +46,8 @@ def _run_container_backup_job(job_id: str, container_name: str, storage_target_i
                                stop_container: bool = False):
     db = SessionLocal()
     try:
+        event_log.log_event("backup", f"Backup für Container „{container_name}“ gestartet")
+
         def progress(step, name, total=None):
             job_tracker.update_progress(job_id, step, name, total)
 
@@ -82,10 +84,17 @@ def _run_container_backup_job(job_id: str, container_name: str, storage_target_i
 
         if result.cancelled:
             job_tracker.cancel_job(job_id)
+            event_log.log_event("backup", f"Backup für Container „{container_name}“ abgebrochen", level="error")
         else:
             job_tracker.finish_job(job_id, result.ok, result.error, record.id)
+            if result.ok:
+                event_log.log_event("backup", f"Backup für Container „{container_name}“ erfolgreich abgeschlossen")
+            else:
+                event_log.log_event("backup", f"Backup für Container „{container_name}“ fehlgeschlagen: {result.error}",
+                                     level="error")
     except Exception as exc:  # noqa: BLE001
         job_tracker.finish_job(job_id, False, str(exc))
+        event_log.log_event("backup", f"Backup für Container „{container_name}“ fehlgeschlagen: {exc}", level="error")
     finally:
         db.close()
 

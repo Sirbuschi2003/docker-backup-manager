@@ -319,6 +319,14 @@ des jeweiligen Backups. Der Schalter ist standardmäßig deaktiviert, damit sich
 bestehende Zeitpläne nicht ändern; bereits gestoppte Container werden dabei
 nicht angefasst (kein ungewolltes Starten).
 
+### Logübersicht
+
+Unter „Logs" in der Seitenleiste gibt es eine chronologische Übersicht aller
+Backup-, Restore- und Zeitplan-Läufe (Start, Erfolg, Fehler, Abbruch) mit
+Zeitstempel - anders als die Fortschrittsanzeigen unten links (die nur
+laufende Jobs zeigen und beim Neustart der App verloren gehen) bleibt diese
+Übersicht dauerhaft in der Datenbank erhalten.
+
 ### Volumes direkt streamen (ohne lokalen Speicherbedarf)
 
 Standardmäßig wird ein Backup zuerst **komplett lokal** unter `/data/backups`
