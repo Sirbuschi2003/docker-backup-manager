@@ -156,12 +156,52 @@ def test_backup_container_archives_bind_mounts_and_skips_denylisted_ones(tmp_pat
     assert (result.path / "volumes" / "nc-db.tar.gz").exists()
 
 
+def test_list_landscape_containers_filters_by_name_contains(monkeypatch):
+    aio_apache = MagicMock()
+    aio_apache.name = "nextcloud-aio-apache"
+    aio_apache.labels = {}
+    aio_db = MagicMock()
+    aio_db.name = "nextcloud-aio-database"
+    aio_db.labels = {}
+    unrelated = MagicMock()
+    unrelated.name = "portainer"
+    unrelated.labels = {}
+
+    client = MagicMock()
+    client.containers.list.return_value = [aio_apache, aio_db, unrelated]
+    monkeypatch.setattr(backup_engine, "get_client", lambda: client)
+
+    result = backup_engine.list_landscape_containers(name_contains="nextcloud-aio")
+
+    assert {c.name for c in result} == {"nextcloud-aio-apache", "nextcloud-aio-database"}
+
+
+def test_list_landscape_containers_name_contains_is_case_insensitive(monkeypatch):
+    container = MagicMock()
+    container.name = "Nextcloud-AIO-Apache"
+    client = MagicMock()
+    client.containers.list.return_value = [container]
+    monkeypatch.setattr(backup_engine, "get_client", lambda: client)
+
+    result = backup_engine.list_landscape_containers(name_contains="nextcloud-aio")
+    assert len(result) == 1
+
+
+def test_backup_landscape_uses_name_contains_as_fallback_label(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(backup_engine, "list_landscape_containers",
+                         lambda project_filter=None, name_contains=None: [])
+    result = backup_engine.backup_landscape(dest_root=tmp_path, name_contains="nextcloud-aio")
+    assert result.name == "nextcloud-aio"
+    assert (tmp_path / "_landscapes" / "nextcloud-aio").exists()
+
+
 def test_backup_landscape_carries_member_results_for_tracking(tmp_path: Path, monkeypatch):
     container_a = MagicMock(name="a")
     container_a.name = "app-a"
     container_b = MagicMock(name="b")
     container_b.name = "app-b"
-    monkeypatch.setattr(backup_engine, "list_landscape_containers", lambda project_filter=None: [container_a, container_b])
+    monkeypatch.setattr(backup_engine, "list_landscape_containers",
+                         lambda project_filter=None, name_contains=None: [container_a, container_b])
 
     canned_results = {
         "app-a": BackupResult(ok=True, name="app-a", path=tmp_path / "app-a" / "v1", size_bytes=123),

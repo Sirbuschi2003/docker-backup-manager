@@ -659,6 +659,7 @@ async function schedulesPage() {
     const row = h(`<tr>
       <td>${s.name}</td>
       <td>${s.target_type === "container" ? "Container: " + s.target_ref
+        : s.name_contains ? `Name enthält: ${s.name_contains}`
         : s.project_filter ? `Projekt: ${s.project_filter}` : "Gesamte Landschaft"}</td>
       <td>${describeCron(s.cron_expression)}</td>
       <td>${s.retention_count > 0 ? s.retention_count + " Versionen" : ""}${s.retention_days > 0 ? " / " + s.retention_days + " Tage" : ""}</td>
@@ -755,6 +756,12 @@ async function openScheduleModal(existing) {
             <option value="">Alle Container (gesamte Landschaft)</option>
             ${Object.keys(projects).sort().map((p) => `<option value="${p}">Nur Projekt „${p}" (${projects[p].length} Container, z. B. Immich/Nextcloud-Stack)</option>`).join("")}
           </select>
+          <div class="muted" style="font-size:.75rem; margin-top:6px;">
+            Setups ohne Docker-Compose-Projekt (z. B. Nextcloud AIO) tauchen hier nicht auf.
+            Stattdessen unten einen Namensbestandteil eintragen, den alle zugehörigen Container gemeinsam haben.
+          </div>
+          <label style="margin-top:8px; display:block;">Oder: Name enthält (überschreibt die Auswahl oben)</label>
+          <input type="text" id="s-name-contains" placeholder="z. B. nextcloud-aio" />
         </div>
         <div class="field"><label>Wie oft?</label>
           <select id="s-freq">
@@ -816,6 +823,7 @@ async function openScheduleModal(existing) {
     overlay.querySelector("#s-target-type").value = existing.target_type;
     if (existing.target_type === "container") overlay.querySelector("#s-target-ref").value = existing.target_ref || "";
     overlay.querySelector("#s-project-filter").value = existing.project_filter || "";
+    overlay.querySelector("#s-name-contains").value = existing.name_contains || "";
     (existing.storage_target_ids || []).forEach((id) => {
       const cb = overlay.querySelector(`.s-storage-target[value="${id}"]`);
       if (cb) cb.checked = true;
@@ -864,7 +872,9 @@ async function openScheduleModal(existing) {
       name: overlay.querySelector("#s-name").value.trim() || "Backup",
       target_type: overlay.querySelector("#s-target-type").value,
       target_ref: overlay.querySelector("#s-target-ref").value || null,
-      project_filter: overlay.querySelector("#s-project-filter").value || null,
+      project_filter: overlay.querySelector("#s-name-contains").value.trim()
+        ? null : (overlay.querySelector("#s-project-filter").value || null),
+      name_contains: overlay.querySelector("#s-name-contains").value.trim() || null,
       cron_expression: buildCronExpression(),
       retention_count: parseInt(overlay.querySelector("#s-ret-count").value || "0", 10),
       retention_days: parseInt(overlay.querySelector("#s-ret-days").value || "0", 10),

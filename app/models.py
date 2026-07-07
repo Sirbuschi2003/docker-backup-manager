@@ -55,6 +55,7 @@ class Schedule(Base):
     target_type = Column(String(16), nullable=False)  # "container" | "landscape"
     target_ref = Column(String(255), nullable=True)  # container name, empty for landscape
     project_filter = Column(String(255), nullable=True)  # landscape only: limit to one Compose project (e.g. multi-container apps like Immich/Nextcloud); empty = entire landscape
+    name_contains = Column(String(255), nullable=True)  # landscape only: alternative to project_filter for apps without a Compose project label (e.g. Nextcloud AIO) - matches container names by substring
     cron_expression = Column(String(64), nullable=False)  # standard 5-field cron
     retention_count = Column(Integer, default=7)
     retention_days = Column(Integer, default=0)

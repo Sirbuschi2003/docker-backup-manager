@@ -255,7 +255,13 @@ da die Backup/Restore-Funktionen die Docker-API benötigen.
    einzelnes Compose-Projekt** einschränken — praktisch für Multi-Container-
    Anwendungen wie Immich oder Nextcloud (App-Server, Datenbank, Redis, ... als
    ein zusammengehöriges Backup, statt Container einzeln oder die komplette
-   Landschaft zu sichern). **Wichtig:** Zeitpläne werden standardmäßig in **UTC**
+   Landschaft zu sichern). Manche Multi-Container-Apps setzen aber gar kein
+   Docker-Compose-Projekt-Label (z. B. **Nextcloud All-in-One**, dessen
+   Mastercontainer die anderen Container direkt über die Docker-API anlegt) —
+   die tauchen dann in der Projekt-Auswahl nicht auf. Dafür gibt es alternativ
+   das Feld **„Name enthält"**: ein Namensbestandteil wie `nextcloud-aio`
+   bündelt alle Container, deren Name diesen Text enthält, unabhängig von
+   Compose-Labels. **Wichtig:** Zeitpläne werden standardmäßig in **UTC**
    ausgewertet, nicht in deiner lokalen Zeit — ohne `DBM_TZ` läuft ein für
    03:00 Uhr geplantes Backup tatsächlich um 03:00 UTC (in Deutschland je nach
    Jahreszeit 1–2 Stunden später). Setze `DBM_TZ` auf deine IANA-Zeitzone

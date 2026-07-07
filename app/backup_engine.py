@@ -287,7 +287,8 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
         return BackupResult(ok=False, name=name, path=backup_dir, error=str(exc))
 
 
-def list_landscape_containers(project_filter: Optional[str] = None) -> list:
+def list_landscape_containers(project_filter: Optional[str] = None,
+                               name_contains: Optional[str] = None) -> list:
     client = get_client()
     containers = client.containers.list(all=True)
     if project_filter:
@@ -295,16 +296,25 @@ def list_landscape_containers(project_filter: Optional[str] = None) -> list:
             c for c in containers
             if c.labels.get("com.docker.compose.project") == project_filter
         ]
+    if name_contains:
+        # For multi-container apps that don't set the Compose project label -
+        # e.g. Nextcloud All-in-One creates its sibling containers directly via
+        # the Docker API, not docker-compose, so they never show up as a
+        # selectable "project" and each gets backed up as its own separate
+        # top-level entry otherwise.
+        needle = name_contains.lower()
+        containers = [c for c in containers if needle in c.name.lower()]
     return containers
 
 
 def backup_landscape(dest_root: Path = BACKUPS_DIR, project_filter: Optional[str] = None,
+                      name_contains: Optional[str] = None,
                       label: Optional[str] = None,
                       on_progress: ProgressCallback = _noop_progress,
                       stream_target: Optional[StreamTarget] = None) -> BackupResult:
-    containers = list_landscape_containers(project_filter)
+    containers = list_landscape_containers(project_filter, name_contains)
     ts = _timestamp()
-    landscape_name = label or (project_filter or "landscape")
+    landscape_name = label or project_filter or name_contains or "landscape"
     landscape_dir = dest_root / "_landscapes" / sanitize_name(landscape_name) / ts
     landscape_dir.mkdir(parents=True, exist_ok=True)
 

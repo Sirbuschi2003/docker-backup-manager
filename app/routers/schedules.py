@@ -19,6 +19,7 @@ class SchedulePayload(BaseModel):
     target_type: str  # "container" | "landscape"
     target_ref: Optional[str] = None
     project_filter: Optional[str] = None  # landscape only: limit to one Compose project
+    name_contains: Optional[str] = None  # landscape only: alternative to project_filter, matches container names by substring
     cron_expression: str
     retention_count: int = 7
     retention_days: int = 0
@@ -40,7 +41,7 @@ def list_schedules(db: Session = Depends(get_db), user: User = Depends(get_curre
     return {"schedules": [
         {
             "id": s.id, "name": s.name, "target_type": s.target_type, "target_ref": s.target_ref,
-            "project_filter": s.project_filter,
+            "project_filter": s.project_filter, "name_contains": s.name_contains,
             "cron_expression": s.cron_expression, "retention_count": s.retention_count,
             "retention_days": s.retention_days,
             "storage_target_ids": json.loads(s.storage_target_ids or "[]"),
