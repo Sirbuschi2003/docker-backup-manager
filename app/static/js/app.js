@@ -615,7 +615,8 @@ async function schedulesPage() {
     const targetNames = (s.storage_target_ids || []).map((id) => targetById[id] || `#${id}`);
     const row = h(`<tr>
       <td>${s.name}</td>
-      <td>${s.target_type === "container" ? "Container: " + s.target_ref : "Gesamte Landschaft"}</td>
+      <td>${s.target_type === "container" ? "Container: " + s.target_ref
+        : s.project_filter ? `Projekt: ${s.project_filter}` : "Gesamte Landschaft"}</td>
       <td>${describeCron(s.cron_expression)}</td>
       <td>${s.retention_count > 0 ? s.retention_count + " Versionen" : ""}${s.retention_days > 0 ? " / " + s.retention_days + " Tage" : ""}</td>
       <td>${targetNames.length ? targetNames.join(", ") : '<span class="muted">nur lokal</span>'}</td>
@@ -644,8 +645,13 @@ async function schedulesPage() {
 
 async function openScheduleModal() {
   let containers = [];
+  let projects = {};
   let storageTargets = [];
-  try { containers = (await api("/api/containers")).containers; } catch (e) {}
+  try {
+    const data = await api("/api/containers");
+    containers = data.containers;
+    projects = data.projects;
+  } catch (e) {}
   try { storageTargets = (await api("/api/settings/storage-targets")).targets; } catch (e) {}
 
   const targetsHtml = storageTargets.length
@@ -671,6 +677,13 @@ async function openScheduleModal() {
         <div class="field" id="s-container-field" style="display:none">
           <label>Container</label>
           <select id="s-target-ref">${containers.map((c) => `<option value="${c.name}">${c.name}</option>`).join("")}</select>
+        </div>
+        <div class="field" id="s-project-field">
+          <label>Was sichern?</label>
+          <select id="s-project-filter">
+            <option value="">Alle Container (gesamte Landschaft)</option>
+            ${Object.keys(projects).sort().map((p) => `<option value="${p}">Nur Projekt „${p}" (${projects[p].length} Container, z. B. Immich/Nextcloud-Stack)</option>`).join("")}
+          </select>
         </div>
         <div class="field"><label>Wie oft?</label>
           <select id="s-freq">
@@ -715,6 +728,7 @@ async function openScheduleModal() {
   `);
   overlay.querySelector("#s-target-type").addEventListener("change", (e) => {
     overlay.querySelector("#s-container-field").style.display = e.target.value === "container" ? "block" : "none";
+    overlay.querySelector("#s-project-field").style.display = e.target.value === "landscape" ? "block" : "none";
   });
   function updateFrequencyFields() {
     const freq = overlay.querySelector("#s-freq").value;
@@ -751,6 +765,7 @@ async function openScheduleModal() {
       name: overlay.querySelector("#s-name").value.trim() || "Backup",
       target_type: overlay.querySelector("#s-target-type").value,
       target_ref: overlay.querySelector("#s-target-ref").value || null,
+      project_filter: overlay.querySelector("#s-project-filter").value || null,
       cron_expression: buildCronExpression(),
       retention_count: parseInt(overlay.querySelector("#s-ret-count").value || "0", 10),
       retention_days: parseInt(overlay.querySelector("#s-ret-days").value || "0", 10),

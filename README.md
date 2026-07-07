@@ -226,7 +226,11 @@ da die Backup/Restore-Funktionen die Docker-API benötigen.
    explizit aus, an welche(s) Speicherziel(e) dieser Zeitplan hochladen soll**
    (Checkboxen im Zeitplan-Dialog — leer lassen für „nur lokal“). So kannst du
    z. B. einen Zeitplan nach Google Drive und einen anderen nach SMB laufen
-   lassen.
+   lassen. Bei „Gesamte Docker-Landschaft" lässt sich zusätzlich auf **ein
+   einzelnes Compose-Projekt** einschränken — praktisch für Multi-Container-
+   Anwendungen wie Immich oder Nextcloud (App-Server, Datenbank, Redis, ... als
+   ein zusammengehöriges Backup, statt Container einzeln oder die komplette
+   Landschaft zu sichern).
 5. Unter **Einstellungen** kannst du Speicherziele für Offsite-Kopien anlegen:
    - **SMB/CIFS (empfohlen für Windows-Freigaben/NAS)**: Server, Freigabename,
      Benutzername + Passwort direkt in der App eintragen — kein Host-Mount,

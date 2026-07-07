@@ -26,6 +26,8 @@ def _add_missing_columns():
             existing = {col["name"] for col in inspector.get_columns("schedules")}
             if "storage_target_ids" not in existing:
                 conn.execute(text("ALTER TABLE schedules ADD COLUMN storage_target_ids TEXT NOT NULL DEFAULT '[]'"))
+            if "project_filter" not in existing:
+                conn.execute(text("ALTER TABLE schedules ADD COLUMN project_filter TEXT"))
 
         if "backup_records" in tables:
             existing = {col["name"] for col in inspector.get_columns("backup_records")}

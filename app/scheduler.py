@@ -39,7 +39,8 @@ def run_schedule(schedule_id: int):
             if sched.target_type == "container":
                 result = backup_engine.backup_container(sched.target_ref, BACKUPS_DIR, on_progress=progress)
             else:
-                result = backup_engine.backup_landscape(BACKUPS_DIR, label=sched.name, on_progress=progress)
+                result = backup_engine.backup_landscape(BACKUPS_DIR, project_filter=sched.project_filter,
+                                                          label=sched.name, on_progress=progress)
 
             record = BackupRecord(
                 backup_type=sched.target_type,
