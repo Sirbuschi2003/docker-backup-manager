@@ -57,6 +57,7 @@ function toast(message, type = "ok") {
 
 // ---------- global job tray (always visible, on every page) ----------
 let jobTrayEl;
+let dashboardJobsTimer = null;
 const toastedJobIds = new Set();
 const finishedJobHideAt = new Map(); // jobId -> timestamp when it should be removed from the tray
 
@@ -256,6 +257,10 @@ function shell(activeKey, contentEl) {
 
 async function navigate(key) {
   state.route = key;
+  if (dashboardJobsTimer) {
+    clearInterval(dashboardJobsTimer);
+    dashboardJobsTimer = null;
+  }
   try {
     let content;
     if (key === "dashboard") content = await dashboardPage();
@@ -317,6 +322,31 @@ async function dashboardPage() {
   } else {
     jobsData.jobs.slice(0, 6).forEach((job) => jobsContainer.appendChild(renderJobCard(job)));
   }
+
+  async function refreshDashboardJobs() {
+    let jobs;
+    try { jobs = (await api("/api/jobs")).jobs; } catch (e) { return; }
+    jobs = jobs.slice(0, 6);
+    if (!jobs.length) {
+      if (!jobsContainer.querySelector(".empty-state")) {
+        jobsContainer.innerHTML = `<div class="empty-state">Keine Jobs bisher</div>`;
+      }
+      return;
+    }
+    const emptyState = jobsContainer.querySelector(".empty-state");
+    if (emptyState) emptyState.remove();
+    const visibleIds = new Set(jobs.map((j) => String(j.id)));
+    jobsContainer.querySelectorAll(".job-card").forEach((card) => {
+      if (!visibleIds.has(card.dataset.jobId)) card.remove();
+    });
+    jobs.forEach((job) => {
+      const existing = jobsContainer.querySelector(`.job-card[data-job-id="${job.id}"]`);
+      if (existing) updateJobCard(existing, job);
+      else jobsContainer.appendChild(renderJobCard(job));
+    });
+  }
+  dashboardJobsTimer = setInterval(refreshDashboardJobs, 1500);
+
   return wrap;
 }
 

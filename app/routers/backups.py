@@ -87,6 +87,18 @@ def _run_landscape_job(job_id: str, label: Optional[str], project_filter: Option
         db.commit()
         db.refresh(record)
 
+        # Each member container backup lives in its own directory with real
+        # data (image, volumes) - without its own record it'd be invisible in
+        # the UI, never deletable, and never subject to retention, even
+        # though it still takes up real disk space.
+        for member in result.member_results:
+            db.add(BackupRecord(
+                backup_type="container", name=member.name, path=str(member.path),
+                status="ok" if member.ok else "failed", error=member.error,
+                size_bytes=member.size_bytes, containers_json=json.dumps([member.name]),
+            ))
+        db.commit()
+
         if result.ok:
             def upload_progress(label_, idx, total):
                 job_tracker.update_progress(job_id, 1, label_, 1)

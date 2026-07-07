@@ -44,6 +44,12 @@ class BackupResult:
     size_bytes: int = 0
     error: Optional[str] = None
     containers: list[str] = field(default_factory=list)
+    # For landscape backups: each member container's own BackupResult, so the
+    # caller can record them individually (they're real container backups
+    # living in their own directory - without a BackupRecord each, they're
+    # invisible in the UI, never deletable, and never subject to retention,
+    # even though they still consume real disk space).
+    member_results: list["BackupResult"] = field(default_factory=list)
 
 
 def _timestamp() -> str:
@@ -174,6 +180,10 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
         size = dir_size_bytes(backup_dir)
         return BackupResult(ok=True, name=name, path=backup_dir, size_bytes=size, containers=[name])
     except Exception as exc:  # noqa: BLE001
+        # Don't leave a half-written backup directory (partial image.tar, etc.) behind -
+        # it would be unusable but still count toward disk usage forever, since a
+        # failed BackupResult has no size_bytes and isn't retention-eligible either.
+        shutil.rmtree(backup_dir, ignore_errors=True)
         return BackupResult(ok=False, name=name, path=backup_dir, error=str(exc))
 
 
@@ -198,12 +208,14 @@ def backup_landscape(dest_root: Path = BACKUPS_DIR, project_filter: Optional[str
     landscape_dir.mkdir(parents=True, exist_ok=True)
 
     member_names = []
+    member_results = []
     errors = []
     total = max(len(containers), 1)
     for idx, c in enumerate(containers, start=1):
         on_progress(idx, f"Backing up {c.name} ({idx}/{total})", total)
         result = backup_container(c.name, dest_root)
         member_names.append(result.name)
+        member_results.append(result)
         if not result.ok:
             errors.append(f"{result.name}: {result.error}")
         else:
@@ -230,6 +242,7 @@ def backup_landscape(dest_root: Path = BACKUPS_DIR, project_filter: Optional[str
     return BackupResult(
         ok=ok, name=landscape_name, path=landscape_dir, size_bytes=size,
         error="; ".join(errors) if errors else None, containers=member_names,
+        member_results=member_results,
     )
 
 
