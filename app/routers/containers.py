@@ -1,6 +1,8 @@
 import threading
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app import backup_engine, job_tracker, storage_sync
@@ -39,7 +41,7 @@ def list_containers(user: User = Depends(get_current_user)):
     return {"containers": result, "projects": projects}
 
 
-def _run_container_backup_job(job_id: str, container_name: str):
+def _run_container_backup_job(job_id: str, container_name: str, storage_target_ids: Optional[list[int]]):
     db = SessionLocal()
     try:
         def progress(step, name, total=None):
@@ -63,7 +65,10 @@ def _run_container_backup_job(job_id: str, container_name: str):
             def upload_progress(label, idx, total):
                 job_tracker.update_progress(job_id, 1, label, 1)
 
-            storage_sync.sync_to_all_targets(result.path, on_progress=upload_progress)
+            if storage_target_ids is None:
+                storage_sync.sync_to_all_targets(result.path, on_progress=upload_progress)
+            else:
+                storage_sync.sync_to_selected_targets(result.path, storage_target_ids, on_progress=upload_progress)
 
         job_tracker.finish_job(job_id, result.ok, result.error, record.id)
     except Exception as exc:  # noqa: BLE001
@@ -72,9 +77,16 @@ def _run_container_backup_job(job_id: str, container_name: str):
         db.close()
 
 
+class ContainerBackupPayload(BaseModel):
+    storage_target_ids: Optional[list[int]] = None
+
+
 @router.post("/{name}/backup")
-def backup_container_now(name: str, user: User = Depends(get_current_user)):
+def backup_container_now(name: str, payload: ContainerBackupPayload = ContainerBackupPayload(),
+                          user: User = Depends(get_current_user)):
     job = job_tracker.create_job("backup", name, total_steps=1)
-    thread = threading.Thread(target=_run_container_backup_job, args=(job.id, name), daemon=True)
+    thread = threading.Thread(
+        target=_run_container_backup_job, args=(job.id, name, payload.storage_target_ids), daemon=True,
+    )
     thread.start()
     return {"job_id": job.id}

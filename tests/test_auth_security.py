@@ -43,6 +43,26 @@ def test_reset_password_script_creates_and_resets_user():
         db.close()
 
 
+def test_storage_target_test_endpoint_works_before_saving(tmp_path):
+    from app.main import app
+    from app.reset_password import reset_password
+
+    reset_password("storage-test-user", "supersecret1")
+
+    with TestClient(app) as client:
+        client.post("/api/auth/login", json={"username": "storage-test-user", "password": "supersecret1"})
+
+        ok = client.post("/api/settings/storage-targets/test", json={
+            "type": "local_path", "config": {"path": str(tmp_path / "somewhere")},
+        })
+        assert ok.status_code == 200
+
+        bad = client.post("/api/settings/storage-targets/test", json={
+            "type": "smb", "config": {"server": "127.0.0.1", "share": "nope", "username": "x", "password": "x"},
+        })
+        assert bad.status_code == 400
+
+
 def test_init_db_migrates_pre_existing_schedules_table_missing_storage_target_ids(tmp_path, monkeypatch):
     import importlib
     import sqlite3

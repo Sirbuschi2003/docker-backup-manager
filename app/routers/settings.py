@@ -88,6 +88,22 @@ def delete_target(target_id: int, db: Session = Depends(get_db), user: User = De
     return {"ok": True}
 
 
+class StorageTargetTestPayload(BaseModel):
+    type: str
+    config: dict
+
+
+@router.post("/storage-targets/test")
+def test_storage_target_config(payload: StorageTargetTestPayload, user: User = Depends(get_current_user)):
+    """Tests connection settings before a target has been saved, so mistakes
+    (wrong share name, bad credentials, ...) surface immediately in the dialog."""
+    try:
+        storage_sync.check_target_connection(payload.type, json.dumps(payload.config))
+        return {"ok": True}
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, f"Connection test failed: {exc}")
+
+
 @router.post("/storage-targets/{target_id}/test")
 def test_storage_target(target_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     target = db.query(StorageTarget).filter(StorageTarget.id == target_id).first()

@@ -291,6 +291,45 @@ async function dashboardPage() {
   return wrap;
 }
 
+// ---------- Shared: pick storage targets before starting a manual backup ----------
+async function pickStorageTargetsAndRun(title, runFn) {
+  let storageTargets = [];
+  try { storageTargets = (await api("/api/settings/storage-targets")).targets; } catch (e) {}
+  if (!storageTargets.length) {
+    // Nothing configured - nothing to choose, just run against the local backup store.
+    await runFn(null);
+    return;
+  }
+  const targetsHtml = storageTargets.map((t) => `
+    <label style="display:flex; align-items:center; gap:8px; padding:6px 0;">
+      <input type="checkbox" class="b-storage-target" value="${t.id}" style="width:auto;" ${t.enabled ? "checked" : "disabled"} />
+      ${t.name} <span class="muted" style="font-size:.78rem">(${t.type})</span>
+      ${t.enabled ? "" : '<span class="badge neutral">deaktiviert</span>'}
+    </label>`).join("");
+  const overlay = h(`
+    <div class="modal-overlay">
+      <div class="modal">
+        <h3>${title}</h3>
+        <div class="field">
+          <label>Zusätzlich hochladen nach (neben dem lokalen Speicher)</label>
+          <div>${targetsHtml}</div>
+        </div>
+        <div class="row-actions">
+          <button class="btn" id="cancel-btn">Abbrechen</button>
+          <button class="btn primary" id="start-btn">Backup starten</button>
+        </div>
+      </div>
+    </div>
+  `);
+  overlay.querySelector("#cancel-btn").addEventListener("click", () => overlay.remove());
+  overlay.querySelector("#start-btn").addEventListener("click", async () => {
+    const ids = Array.from(overlay.querySelectorAll(".b-storage-target:checked")).map((el) => parseInt(el.value, 10));
+    overlay.remove();
+    await runFn(ids);
+  });
+  document.body.appendChild(overlay);
+}
+
 // ---------- Containers ----------
 async function containersPage() {
   const data = await api("/api/containers").catch((e) => { toast(e.message, "error"); return { containers: [], projects: {} }; });
@@ -319,23 +358,31 @@ async function containersPage() {
       <td><button class="btn">Backup jetzt</button></td>
     </tr>`);
     row.querySelector("button").addEventListener("click", async (e) => {
-      e.target.disabled = true;
-      try {
-        await api(`/api/containers/${encodeURIComponent(c.name)}/backup`, { method: "POST" });
-        toast(`Backup für ${c.name} gestartet`);
-        pollGlobalJobs();
-      } catch (err) { toast(err.message, "error"); }
-      e.target.disabled = false;
+      await pickStorageTargetsAndRun(`Backup für ${c.name}`, async (storageTargetIds) => {
+        e.target.disabled = true;
+        try {
+          await api(`/api/containers/${encodeURIComponent(c.name)}/backup`, {
+            method: "POST", body: JSON.stringify({ storage_target_ids: storageTargetIds }),
+          });
+          toast(`Backup für ${c.name} gestartet`);
+          pollGlobalJobs();
+        } catch (err) { toast(err.message, "error"); }
+        e.target.disabled = false;
+      });
     });
     tbody.appendChild(row);
   });
 
   wrap.querySelector("#backup-all-btn").addEventListener("click", async () => {
-    try {
-      await api("/api/backups/landscape", { method: "POST", body: JSON.stringify({}) });
-      toast("Landschafts-Backup gestartet");
-      pollGlobalJobs();
-    } catch (err) { toast(err.message, "error"); }
+    await pickStorageTargetsAndRun("Gesamte Landschaft sichern", async (storageTargetIds) => {
+      try {
+        await api("/api/backups/landscape", {
+          method: "POST", body: JSON.stringify({ storage_target_ids: storageTargetIds }),
+        });
+        toast("Landschafts-Backup gestartet");
+        pollGlobalJobs();
+      } catch (err) { toast(err.message, "error"); }
+    });
   });
 
   return wrap;
@@ -469,6 +516,21 @@ async function openLandscapeMembersModal(version) {
 }
 
 // ---------- Schedules ----------
+const WEEKDAY_LABELS = ["So", "Mo", "Di", "Mi", "Do", "Fr", "Sa"];
+
+function describeCron(cron) {
+  const parts = (cron || "").trim().split(/\s+/);
+  if (parts.length !== 5) return cron;
+  const [minute, hour, dayOfMonth, , dayOfWeek] = parts;
+  const time = `${hour.padStart(2, "0")}:${minute.padStart(2, "0")} Uhr`;
+  if (dayOfMonth !== "*") return `Monatlich am ${dayOfMonth}. um ${time}`;
+  if (dayOfWeek !== "*") {
+    const days = dayOfWeek.split(",").map((d) => WEEKDAY_LABELS[parseInt(d, 10)] || d).join(", ");
+    return `Wöchentlich (${days}) um ${time}`;
+  }
+  return `Täglich um ${time}`;
+}
+
 async function schedulesPage() {
   const [data, targetsData] = await Promise.all([api("/api/schedules"), api("/api/settings/storage-targets")]);
   const targetById = Object.fromEntries(targetsData.targets.map((t) => [t.id, t.name]));
@@ -478,7 +540,7 @@ async function schedulesPage() {
     </div>
     <div class="card" style="padding:0">
       <table>
-        <thead><tr><th>Name</th><th>Quelle</th><th>Cron</th><th>Aufbewahrung</th><th>Speicherziele</th><th>Letzter Lauf</th><th>Status</th><th></th></tr></thead>
+        <thead><tr><th>Name</th><th>Quelle</th><th>Zeitplan</th><th>Aufbewahrung</th><th>Speicherziele</th><th>Letzter Lauf</th><th>Status</th><th></th></tr></thead>
         <tbody id="sched-tbody"></tbody>
       </table>
     </div>
@@ -490,7 +552,7 @@ async function schedulesPage() {
     const row = h(`<tr>
       <td>${s.name}</td>
       <td>${s.target_type === "container" ? "Container: " + s.target_ref : "Gesamte Landschaft"}</td>
-      <td class="mono">${s.cron_expression}</td>
+      <td>${describeCron(s.cron_expression)}</td>
       <td>${s.retention_count > 0 ? s.retention_count + " Versionen" : ""}${s.retention_days > 0 ? " / " + s.retention_days + " Tage" : ""}</td>
       <td>${targetNames.length ? targetNames.join(", ") : '<span class="muted">nur lokal</span>'}</td>
       <td>${fmtDate(s.last_run_at)}</td>
@@ -546,9 +608,28 @@ async function openScheduleModal() {
           <label>Container</label>
           <select id="s-target-ref">${containers.map((c) => `<option value="${c.name}">${c.name}</option>`).join("")}</select>
         </div>
-        <div class="field"><label>Cron-Ausdruck (Minute Stunde Tag Monat Wochentag)</label>
-          <input type="text" id="s-cron" placeholder="0 3 * * *" value="0 3 * * *" />
-          <div class="muted" style="font-size:.75rem; margin-top:4px;">Beispiel: "0 3 * * *" = täglich um 03:00 Uhr</div>
+        <div class="field"><label>Wie oft?</label>
+          <select id="s-freq">
+            <option value="daily">Täglich</option>
+            <option value="weekly">Wöchentlich</option>
+            <option value="monthly">Monatlich</option>
+          </select>
+        </div>
+        <div class="field"><label>Uhrzeit</label><input type="time" id="s-time" value="03:00" /></div>
+        <div class="field" id="s-weekdays-field" style="display:none">
+          <label>An welchen Tagen?</label>
+          <div style="display:flex; gap:10px; flex-wrap:wrap;">
+            ${[["Mo", 1], ["Di", 2], ["Mi", 3], ["Do", 4], ["Fr", 5], ["Sa", 6], ["So", 0]].map(([label, cronDow], i) => `
+              <label style="display:flex; align-items:center; gap:4px;">
+                <input type="checkbox" class="s-weekday" value="${cronDow}" style="width:auto;" ${i === 0 ? "checked" : ""} /> ${label}
+              </label>`).join("")}
+          </div>
+        </div>
+        <div class="field" id="s-monthday-field" style="display:none">
+          <label>An welchem Tag im Monat?</label>
+          <select id="s-monthday">
+            ${Array.from({ length: 28 }, (_, i) => i + 1).map((d) => `<option value="${d}" ${d === 1 ? "selected" : ""}>${d}.</option>`).join("")}
+          </select>
         </div>
         <div class="field"><label>Aufbewahrung: Anzahl Versionen (0 = unbegrenzt)</label><input type="text" id="s-ret-count" value="7" /></div>
         <div class="field"><label>Aufbewahrung: Tage (0 = deaktiviert)</label><input type="text" id="s-ret-days" value="0" /></div>
@@ -566,6 +647,28 @@ async function openScheduleModal() {
   overlay.querySelector("#s-target-type").addEventListener("change", (e) => {
     overlay.querySelector("#s-container-field").style.display = e.target.value === "container" ? "block" : "none";
   });
+  function updateFrequencyFields() {
+    const freq = overlay.querySelector("#s-freq").value;
+    overlay.querySelector("#s-weekdays-field").style.display = freq === "weekly" ? "block" : "none";
+    overlay.querySelector("#s-monthday-field").style.display = freq === "monthly" ? "block" : "none";
+  }
+  overlay.querySelector("#s-freq").addEventListener("change", updateFrequencyFields);
+  updateFrequencyFields();
+
+  function buildCronExpression() {
+    const [hour, minute] = overlay.querySelector("#s-time").value.split(":").map((n) => parseInt(n, 10));
+    const freq = overlay.querySelector("#s-freq").value;
+    if (freq === "weekly") {
+      const days = Array.from(overlay.querySelectorAll(".s-weekday:checked")).map((el) => el.value);
+      return `${minute} ${hour} * * ${days.length ? days.join(",") : "0"}`;
+    }
+    if (freq === "monthly") {
+      const day = overlay.querySelector("#s-monthday").value;
+      return `${minute} ${hour} ${day} * *`;
+    }
+    return `${minute} ${hour} * * *`;
+  }
+
   overlay.querySelector("#cancel-btn").addEventListener("click", () => overlay.remove());
   overlay.querySelector("#save-btn").addEventListener("click", async () => {
     const storageTargetIds = Array.from(overlay.querySelectorAll(".s-storage-target:checked")).map((el) => parseInt(el.value, 10));
@@ -573,7 +676,7 @@ async function openScheduleModal() {
       name: overlay.querySelector("#s-name").value.trim() || "Backup",
       target_type: overlay.querySelector("#s-target-type").value,
       target_ref: overlay.querySelector("#s-target-ref").value || null,
-      cron_expression: overlay.querySelector("#s-cron").value.trim(),
+      cron_expression: buildCronExpression(),
       retention_count: parseInt(overlay.querySelector("#s-ret-count").value || "0", 10),
       retention_days: parseInt(overlay.querySelector("#s-ret-days").value || "0", 10),
       storage_target_ids: storageTargetIds,
@@ -653,10 +756,12 @@ async function settingsPage() {
       <td>${t.last_sync_status ? `<span class="badge ${t.last_sync_status === "ok" ? "ok" : "failed"}">${t.last_sync_status}</span>` : '<span class="badge neutral">noch nicht synchronisiert</span>'}</td>
       <td>${fmtDate(t.last_sync_at)}</td>
       <td style="display:flex; gap:8px;">
+        <button class="btn edit-btn">Bearbeiten</button>
         <button class="btn test-btn">Testen</button>
         <button class="btn danger del-btn">Löschen</button>
       </td>
     </tr>`);
+    row.querySelector(".edit-btn").addEventListener("click", () => openStorageTargetModal(t));
     row.querySelector(".test-btn").addEventListener("click", async () => {
       try { await api(`/api/settings/storage-targets/${t.id}/test`, { method: "POST" }); toast("Verbindung erfolgreich"); }
       catch (e) { toast(e.message, "error"); }
@@ -672,11 +777,11 @@ async function settingsPage() {
   return wrap;
 }
 
-function openStorageTargetModal() {
+function openStorageTargetModal(existing) {
   const overlay = h(`
     <div class="modal-overlay">
       <div class="modal">
-        <h3>Neues Speicherziel</h3>
+        <h3>${existing ? "Speicherziel bearbeiten" : "Neues Speicherziel"}</h3>
         <div class="field"><label>Name</label><input type="text" id="t-name" /></div>
         <div class="field"><label>Typ</label>
           <select id="t-type">
@@ -689,46 +794,53 @@ function openStorageTargetModal() {
         <div id="t-config-fields"></div>
         <div class="row-actions">
           <button class="btn" id="cancel-btn">Abbrechen</button>
+          <button class="btn" id="test-btn">Verbindung testen</button>
           <button class="btn primary" id="save-btn">Speichern</button>
         </div>
       </div>
     </div>
   `);
   const fieldsEl = overlay.querySelector("#t-config-fields");
-  function renderFields(type) {
+  function renderFields(type, cfg) {
+    cfg = cfg || {};
     if (type === "smb") {
       fieldsEl.innerHTML = `
-        <div class="field"><label>Server (IP oder Hostname)</label><input type="text" id="cfg-server" placeholder="192.168.1.50" /></div>
-        <div class="field"><label>Freigabename (Share)</label><input type="text" id="cfg-share" placeholder="backups" /></div>
-        <div class="field"><label>Unterordner (optional)</label><input type="text" id="cfg-base-path" placeholder="docker-backup-manager" /></div>
-        <div class="field"><label>Benutzername</label><input type="text" id="cfg-username" /></div>
-        <div class="field"><label>Passwort</label><input type="password" id="cfg-password" /></div>
-        <div class="field"><label>Domain (optional)</label><input type="text" id="cfg-domain" /></div>
-        <div class="field"><label>Port</label><input type="text" id="cfg-port" value="445" /></div>`;
+        <div class="field"><label>Server (IP oder Hostname)</label><input type="text" id="cfg-server" placeholder="192.168.1.50" value="${cfg.server || ""}" /></div>
+        <div class="field"><label>Freigabename (Share)</label><input type="text" id="cfg-share" placeholder="backups" value="${cfg.share || ""}" /></div>
+        <div class="field"><label>Unterordner (optional)</label><input type="text" id="cfg-base-path" placeholder="docker-backup-manager" value="${cfg.base_path || ""}" /></div>
+        <div class="field"><label>Benutzername</label><input type="text" id="cfg-username" value="${cfg.username || ""}" /></div>
+        <div class="field"><label>Passwort</label><input type="password" id="cfg-password" value="${cfg.password || ""}" /></div>
+        <div class="field"><label>Domain (optional)</label><input type="text" id="cfg-domain" value="${cfg.domain || ""}" /></div>
+        <div class="field"><label>Port</label><input type="text" id="cfg-port" value="${cfg.port || "445"}" /></div>`;
     } else if (type === "local_path") {
       fieldsEl.innerHTML = `
         <div class="field"><label>Pfad im Container (z.B. gemountete SMB/NFS-Freigabe)</label>
-          <input type="text" id="cfg-path" placeholder="/mnt/remote-backup" /></div>`;
+          <input type="text" id="cfg-path" placeholder="/mnt/remote-backup" value="${cfg.path || ""}" /></div>`;
     } else if (type === "s3") {
       fieldsEl.innerHTML = `
-        <div class="field"><label>Bucket</label><input type="text" id="cfg-bucket" /></div>
-        <div class="field"><label>Endpoint-URL (leer = AWS S3)</label><input type="text" id="cfg-endpoint" placeholder="https://s3.eu-central-1.amazonaws.com" /></div>
-        <div class="field"><label>Region</label><input type="text" id="cfg-region" placeholder="eu-central-1" /></div>
-        <div class="field"><label>Access Key</label><input type="text" id="cfg-access" /></div>
-        <div class="field"><label>Secret Key</label><input type="password" id="cfg-secret" /></div>
-        <div class="field"><label>Präfix (optional)</label><input type="text" id="cfg-prefix" /></div>`;
+        <div class="field"><label>Bucket</label><input type="text" id="cfg-bucket" value="${cfg.bucket || ""}" /></div>
+        <div class="field"><label>Endpoint-URL (leer = AWS S3)</label><input type="text" id="cfg-endpoint" placeholder="https://s3.eu-central-1.amazonaws.com" value="${cfg.endpoint_url || ""}" /></div>
+        <div class="field"><label>Region</label><input type="text" id="cfg-region" placeholder="eu-central-1" value="${cfg.region || ""}" /></div>
+        <div class="field"><label>Access Key</label><input type="text" id="cfg-access" value="${cfg.access_key || ""}" /></div>
+        <div class="field"><label>Secret Key</label><input type="password" id="cfg-secret" value="${cfg.secret_key || ""}" /></div>
+        <div class="field"><label>Präfix (optional)</label><input type="text" id="cfg-prefix" value="${cfg.prefix || ""}" /></div>`;
     } else {
       fieldsEl.innerHTML = `
-        <div class="field"><label>rclone Remote-Name (aus rclone.conf)</label><input type="text" id="cfg-remote" placeholder="gdrive" /></div>
-        <div class="field"><label>Remote-Pfad</label><input type="text" id="cfg-remote-path" placeholder="docker-backups" /></div>
+        <div class="field"><label>rclone Remote-Name (aus rclone.conf)</label><input type="text" id="cfg-remote" placeholder="gdrive" value="${cfg.remote || ""}" /></div>
+        <div class="field"><label>Remote-Pfad</label><input type="text" id="cfg-remote-path" placeholder="docker-backups" value="${cfg.remote_path || ""}" /></div>
         <p class="muted" style="font-size:.8rem">Der Remote muss vorher per <span class="mono">rclone config</span> in der gemounteten rclone.conf eingerichtet sein (unterstützt Google Drive, OneDrive, SFTP, WebDAV, u.v.m.).</p>`;
     }
   }
-  renderFields("smb");
+  if (existing) {
+    overlay.querySelector("#t-name").value = existing.name;
+    overlay.querySelector("#t-type").value = existing.type;
+    renderFields(existing.type, existing.config);
+  } else {
+    renderFields("smb");
+  }
   overlay.querySelector("#t-type").addEventListener("change", (e) => renderFields(e.target.value));
 
-  overlay.querySelector("#cancel-btn").addEventListener("click", () => overlay.remove());
-  overlay.querySelector("#save-btn").addEventListener("click", async () => {
+  function readConfig() {
     const type = overlay.querySelector("#t-type").value;
     let config = {};
     if (type === "smb") config = {
@@ -753,9 +865,37 @@ function openStorageTargetModal() {
       remote: overlay.querySelector("#cfg-remote").value.trim(),
       remote_path: overlay.querySelector("#cfg-remote-path").value.trim(),
     };
-    const payload = { name: overlay.querySelector("#t-name").value.trim() || type, type, config, enabled: true };
+    return { type, config };
+  }
+
+  overlay.querySelector("#cancel-btn").addEventListener("click", () => overlay.remove());
+  overlay.querySelector("#test-btn").addEventListener("click", async () => {
+    const { type, config } = readConfig();
+    const btn = overlay.querySelector("#test-btn");
+    btn.disabled = true;
+    btn.textContent = "Teste...";
     try {
-      await api("/api/settings/storage-targets", { method: "POST", body: JSON.stringify(payload) });
+      await api("/api/settings/storage-targets/test", { method: "POST", body: JSON.stringify({ type, config }) });
+      toast("Verbindung erfolgreich");
+    } catch (e) {
+      toast(e.message, "error");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Verbindung testen";
+    }
+  });
+  overlay.querySelector("#save-btn").addEventListener("click", async () => {
+    const { type, config } = readConfig();
+    const payload = {
+      name: overlay.querySelector("#t-name").value.trim() || type, type, config,
+      enabled: existing ? existing.enabled : true,
+    };
+    try {
+      if (existing) {
+        await api(`/api/settings/storage-targets/${existing.id}`, { method: "PUT", body: JSON.stringify(payload) });
+      } else {
+        await api("/api/settings/storage-targets", { method: "POST", body: JSON.stringify(payload) });
+      }
       overlay.remove();
       navigate("settings");
     } catch (e) { toast(e.message, "error"); }

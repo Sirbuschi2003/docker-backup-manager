@@ -48,9 +48,11 @@ def delete_backup(backup_id: int, db: Session = Depends(get_db), user: User = De
 class LandscapeBackupPayload(BaseModel):
     label: Optional[str] = None
     project_filter: Optional[str] = None
+    storage_target_ids: Optional[list[int]] = None
 
 
-def _run_landscape_job(job_id: str, label: Optional[str], project_filter: Optional[str]):
+def _run_landscape_job(job_id: str, label: Optional[str], project_filter: Optional[str],
+                        storage_target_ids: Optional[list[int]]):
     db = SessionLocal()
     try:
         def progress(step, name, total=None):
@@ -75,7 +77,10 @@ def _run_landscape_job(job_id: str, label: Optional[str], project_filter: Option
             def upload_progress(label_, idx, total):
                 job_tracker.update_progress(job_id, 1, label_, 1)
 
-            storage_sync.sync_to_all_targets(result.path, on_progress=upload_progress)
+            if storage_target_ids is None:
+                storage_sync.sync_to_all_targets(result.path, on_progress=upload_progress)
+            else:
+                storage_sync.sync_to_selected_targets(result.path, storage_target_ids, on_progress=upload_progress)
 
         job_tracker.finish_job(job_id, result.ok, result.error, record.id)
     except Exception as exc:  # noqa: BLE001
@@ -88,7 +93,9 @@ def _run_landscape_job(job_id: str, label: Optional[str], project_filter: Option
 def backup_landscape_now(payload: LandscapeBackupPayload, user: User = Depends(get_current_user)):
     job = job_tracker.create_job("backup", payload.label or "landscape", total_steps=1)
     thread = threading.Thread(
-        target=_run_landscape_job, args=(job.id, payload.label, payload.project_filter), daemon=True,
+        target=_run_landscape_job,
+        args=(job.id, payload.label, payload.project_filter, payload.storage_target_ids),
+        daemon=True,
     )
     thread.start()
     return {"job_id": job.id}

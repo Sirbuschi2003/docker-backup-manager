@@ -207,11 +207,15 @@ da die Backup/Restore-Funktionen die Docker-API benötigen.
    min. 8 Zeichen).
 2. Unter **Container** siehst du alle laufenden/gestoppten Container des Hosts
    und kannst pro Container ein sofortiges Backup starten, oder mit
-   „Gesamte Landschaft sichern" alles auf einmal sichern.
+   „Gesamte Landschaft sichern" alles auf einmal sichern. Sind Speicherziele
+   konfiguriert, fragt die App dabei kurz nach, an welche(s) davon zusätzlich
+   hochgeladen werden soll (Checkboxen, alle aktivierten vorausgewählt).
 3. Unter **Backups** siehst du alle Versionen je Container/Landschaft,
    kannst wiederherstellen, herunterladen (Dateisystem) oder löschen.
-4. Unter **Zeitpläne** legst du Cron-Zeitpläne mit Aufbewahrungsrichtlinie an
-   (z. B. täglich 03:00 Uhr, letzte 7 Versionen behalten) **und wählst dort
+4. Unter **Zeitpläne** legst du Zeitpläne mit Aufbewahrungsrichtlinie an
+   (Häufigkeit Täglich/Wöchentlich/Monatlich + Uhrzeit auswählen — kein
+   Cron-Wissen nötig, z. B. täglich 03:00 Uhr, letzte 7 Versionen behalten)
+   **und wählst dort
    explizit aus, an welche(s) Speicherziel(e) dieser Zeitplan hochladen soll**
    (Checkboxen im Zeitplan-Dialog — leer lassen für „nur lokal“). So kannst du
    z. B. einen Zeitplan nach Google Drive und einen anderen nach SMB laufen
