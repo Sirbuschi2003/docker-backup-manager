@@ -2,6 +2,8 @@ import os
 import secrets
 from pathlib import Path
 
+import pytz
+
 BASE_DIR = Path(os.environ.get("DBM_BASE_DIR", "/data")).resolve()
 BACKUPS_DIR = Path(os.environ.get("DBM_BACKUPS_DIR", str(BASE_DIR / "backups"))).resolve()
 DB_PATH = Path(os.environ.get("DBM_DB_PATH", str(BASE_DIR / "dbm.sqlite3"))).resolve()
@@ -42,7 +44,17 @@ DOCKER_HELPER_IMAGE = os.environ.get("DBM_HELPER_IMAGE", "alpine:3.20")
 # to UTC because that's the only thing guaranteed to be correct out of the box -
 # the container has no way to know the operator's local timezone on its own, and
 # getting this wrong silently shifts every scheduled backup by the UTC offset.
-TZ_NAME = os.environ.get("DBM_TZ", "UTC")
+# An invalid name must not crash the scheduler at startup (it's built from this
+# value at import time) - fall back to UTC and keep the bad value around so the
+# UI can point out the typo instead of the whole app failing to boot.
+_tz_env = os.environ.get("DBM_TZ", "UTC")
+try:
+    pytz.timezone(_tz_env)
+    TZ_NAME = _tz_env
+    TZ_ERROR = None
+except pytz.UnknownTimeZoneError:
+    TZ_NAME = "UTC"
+    TZ_ERROR = f"DBM_TZ=\"{_tz_env}\" ist keine gültige Zeitzone (IANA-Name, z. B. \"Europe/Berlin\") - UTC wird verwendet."
 
 # OAuth-based storage targets (Google Drive / OneDrive). PUBLIC_URL is the
 # address the browser uses to reach this app (e.g. "http://192.168.1.10:8420")

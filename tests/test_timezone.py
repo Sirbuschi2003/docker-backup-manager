@@ -27,6 +27,32 @@ def test_tz_name_respects_dbm_tz_env_var(monkeypatch):
         importlib.reload(config)
 
 
+def test_invalid_tz_name_falls_back_to_utc_instead_of_crashing(monkeypatch):
+    from app import config
+
+    monkeypatch.setenv("DBM_TZ", "Not/A_Real_Zone")
+    try:
+        importlib.reload(config)
+        assert config.TZ_NAME == "UTC"
+        assert config.TZ_ERROR is not None
+        assert "Not/A_Real_Zone" in config.TZ_ERROR
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+
+def test_valid_tz_name_has_no_error(monkeypatch):
+    from app import config
+
+    monkeypatch.setenv("DBM_TZ", "Europe/Berlin")
+    try:
+        importlib.reload(config)
+        assert config.TZ_ERROR is None
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+
 def test_add_or_update_job_uses_configured_timezone_not_system_default(monkeypatch):
     from app import config, scheduler
 

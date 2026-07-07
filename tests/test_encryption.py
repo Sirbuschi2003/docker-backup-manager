@@ -24,6 +24,35 @@ def test_is_enabled_true_with_key(enable_encryption):
     assert encryption.is_enabled() is True
 
 
+def test_is_enabled_false_with_malformed_key_instead_of_raising(monkeypatch):
+    # A user pasting a bad/illustrative example value (not real base64, or too
+    # short) must not crash every page that checks encryption status.
+    monkeypatch.setenv("DBM_ENCRYPTION_KEY", "not-valid-base64!!")
+    assert encryption.is_enabled() is False
+
+
+def test_config_error_none_when_unset(monkeypatch):
+    monkeypatch.delenv("DBM_ENCRYPTION_KEY", raising=False)
+    assert encryption.config_error() is None
+
+
+def test_config_error_none_when_valid(enable_encryption):
+    assert encryption.config_error() is None
+
+
+def test_config_error_reports_invalid_base64(monkeypatch):
+    # Malformed padding/length - the same kind of error a hand-typed or
+    # mistyped example key produces (real incident: a user pasted an
+    # illustrative example key verbatim and every page started 500ing).
+    monkeypatch.setenv("DBM_ENCRYPTION_KEY", "Xk9mQwZ3vJf456755gfcp2LrN8hYtF6cEbA1dWs5oGiU7xR4nKvHc=")
+    assert "base64" in encryption.config_error()
+
+
+def test_config_error_reports_too_short_key(monkeypatch):
+    monkeypatch.setenv("DBM_ENCRYPTION_KEY", base64.urlsafe_b64encode(b"short").decode())
+    assert "32 bytes" in encryption.config_error()
+
+
 def test_encrypt_decrypt_roundtrip(enable_encryption, tmp_path: Path):
     src = tmp_path / "data.bin"
     original = os.urandom(5000)  # a few chunks worth

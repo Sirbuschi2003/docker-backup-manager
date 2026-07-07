@@ -312,12 +312,20 @@ async function dashboardPage() {
         <div class="sub">${lastBackup ? fmtDate(lastBackup.created_at) : ""}</div>
       </div>
     </div>
-    ${overview.encryption_enabled
+    ${overview.encryption_error
+      ? `<div class="card" style="margin-top:16px; border-color: var(--warn);">
+           ⚠️ <span class="mono">DBM_ENCRYPTION_KEY</span> ist ungültig: ${overview.encryption_error}
+           Backups werden deshalb aktuell <strong>unverschlüsselt</strong> gespeichert (siehe Einstellungen).
+         </div>`
+      : overview.encryption_enabled
       ? ""
       : `<div class="card" style="margin-top:16px; border-color: var(--warn);">
            ⚠️ Backups werden aktuell <strong>unverschlüsselt</strong> gespeichert. Setze
            <span class="mono">DBM_ENCRYPTION_KEY</span>, um Verschlüsselung zu aktivieren (siehe Einstellungen).
          </div>`}
+    ${overview.timezone_error
+      ? `<div class="card" style="margin-top:16px; border-color: var(--warn);">⚠️ ${overview.timezone_error}</div>`
+      : ""}
     <div class="section-title">Letzte Jobs</div>
     <div id="jobs-container" class="grid cols-3"></div>
   </div>`);
@@ -835,7 +843,9 @@ async function settingsPage() {
     <div class="card">
       <span class="mono" id="server-clock" style="font-size:1.1rem"></span>
       <span class="muted">(Zeitzone: <span class="mono">${overview.timezone}</span> — maßgeblich für Zeitpläne)</span>
-      ${overview.timezone === "UTC" ? `<div class="muted" style="font-size:.8rem; margin-top:6px;">
+      ${overview.timezone_error
+        ? `<div style="font-size:.8rem; margin-top:6px; color: var(--warn);">⚠️ ${overview.timezone_error}</div>`
+        : overview.timezone === "UTC" ? `<div class="muted" style="font-size:.8rem; margin-top:6px;">
         Läuft ein Zeitplan nicht zur erwarteten Uhrzeit: die Standard-Zeitzone ist UTC. Setze die
         Umgebungsvariable <span class="mono">DBM_TZ</span> auf deine Zeitzone (z. B. <span class="mono">Europe/Berlin</span>)
         und starte den Container neu.</div>` : ""}
@@ -846,7 +856,10 @@ async function settingsPage() {
 
     <div class="section-title">Verschlüsselung</div>
     <div class="card">
-      ${overview.encryption_enabled
+      ${overview.encryption_error
+        ? `<span class="badge failed">⚠️ Ungültiger Schlüssel</span> <span class="muted"><span class="mono">DBM_ENCRYPTION_KEY</span> ${overview.encryption_error}
+           Erzeuge einen echten Schlüssel mit <span class="mono">openssl rand -base64 32</span> (nicht abtippen, sondern das Kommando ausführen und die Ausgabe kopieren) und starte den Container neu.</span>`
+        : overview.encryption_enabled
         ? `<span class="badge ok">🔒 Aktiv</span> <span class="muted">Backups werden mit AES-256 verschlüsselt abgelegt (Schlüssel aus <span class="mono">DBM_ENCRYPTION_KEY</span>).</span>`
         : `<span class="badge failed">⚠️ Inaktiv</span> <span class="muted">Backups werden unverschlüsselt gespeichert. Setze die Umgebungsvariable
            <span class="mono">DBM_ENCRYPTION_KEY</span> (z. B. <span class="mono">openssl rand -base64 32</span>) und starte den Container neu.

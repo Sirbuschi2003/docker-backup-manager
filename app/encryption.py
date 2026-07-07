@@ -31,10 +31,7 @@ class DecryptionError(Exception):
     pass
 
 
-def _master_key() -> Optional[bytes]:
-    raw = os.environ.get("DBM_ENCRYPTION_KEY")
-    if not raw:
-        return None
+def _decode_key(raw: str) -> bytes:
     try:
         key = base64.urlsafe_b64decode(raw)
     except Exception as exc:  # noqa: BLE001
@@ -44,8 +41,34 @@ def _master_key() -> Optional[bytes]:
     return key
 
 
+def _master_key() -> Optional[bytes]:
+    raw = os.environ.get("DBM_ENCRYPTION_KEY")
+    if not raw:
+        return None
+    return _decode_key(raw)
+
+
 def is_enabled() -> bool:
-    return _master_key() is not None
+    # A malformed key must not crash every page that checks encryption status
+    # (settings/dashboard overview) - config_error() surfaces the problem
+    # instead, so it's visible without taking the whole app down.
+    try:
+        return _master_key() is not None
+    except ValueError:
+        return False
+
+
+def config_error() -> Optional[str]:
+    """Human-readable problem with DBM_ENCRYPTION_KEY if it's set but invalid
+    (e.g. not valid base64, or too short), otherwise None."""
+    raw = os.environ.get("DBM_ENCRYPTION_KEY")
+    if not raw:
+        return None
+    try:
+        _decode_key(raw)
+    except ValueError as exc:
+        return str(exc)
+    return None
 
 
 def _derive_keys(master_key: bytes) -> tuple[bytes, bytes]:
