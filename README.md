@@ -152,8 +152,15 @@ services:
     restart: unless-stopped
     ports:
       - "8420:8420"
-    # environment:
-    #   DBM_SECRET_KEY: "please-change-this-to-a-long-random-string"  # optional, see "Sicherheit"
+    environment:
+      # Alle optional, siehe "Sicherheit" - in Portainer unter "Environment
+      # variables" ausfüllen; ${VAR:-default} sorgt dafür, dass ein leeres Feld
+      # in Portainer nicht zu einem Fehler führt, sondern auf den Standardwert
+      # zurückfällt. Ohne diesen environment-Block hier würden dort eingetragene
+      # Werte nirgendwo ankommen, egal wie oft man redeployt.
+      DBM_TZ: "${DBM_TZ:-UTC}"
+      DBM_ENCRYPTION_KEY: "${DBM_ENCRYPTION_KEY:-}"
+      DBM_SECRET_KEY: "${DBM_SECRET_KEY:-}"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - dbm_data:/data

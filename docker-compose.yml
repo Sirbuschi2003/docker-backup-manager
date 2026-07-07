@@ -6,33 +6,35 @@ services:
     restart: unless-stopped
     ports:
       - "8420:8420"
-    # Uncomment and set any of these if needed (all optional - see README "Sicherheit"):
-    # environment:
+    # All of these are optional (see README "Sicherheit") and default to blank/UTC
+    # if left unset - using ${VAR:-default} so Portainer's "Environment variables"
+    # UI can fill them in (it substitutes into this file; a variable that isn't
+    # referenced anywhere here, like in a fully-commented-out block, is never
+    # actually passed to the container no matter what you set it to in Portainer).
+    environment:
       # Important for schedules: without this, cron-based schedules are evaluated
       # in UTC, so a schedule set for e.g. 03:00 will actually run at 03:00 UTC,
       # not 03:00 local time. Set to your IANA timezone name.
-      # DBM_TZ: "Europe/Berlin"
-      # Optional: signs session cookies. If unset, a random key is generated
-      # on first start and persisted as /data/.secret_key - only set this
-      # explicitly if you need a stable, self-chosen key (e.g. multiple
-      # replicas sharing one volume).
-      # DBM_SECRET_KEY: "please-change-this-to-a-long-random-string"
-      # Optional: set true if this is served behind HTTPS (reverse proxy),
-      # so the session cookie is only ever sent over an encrypted connection.
-      # DBM_SESSION_HTTPS_ONLY: "true"
-      # Optional but recommended: encrypts backups at rest (AES-256). Generate
-      # with `openssl rand -base64 32` and keep it safe - losing it makes
-      # existing backups permanently unrecoverable.
-      # DBM_ENCRYPTION_KEY: ""
-      # Required only for the Google Drive / OneDrive "sign in" storage targets:
+      DBM_TZ: "${DBM_TZ:-UTC}"
+      # Signs session cookies. If unset, a random key is generated on first start
+      # and persisted as /data/.secret_key - only set this explicitly if you need
+      # a stable, self-chosen key (e.g. multiple replicas sharing one volume).
+      DBM_SECRET_KEY: "${DBM_SECRET_KEY:-}"
+      # Set true if this is served behind HTTPS (reverse proxy), so the session
+      # cookie is only ever sent over an encrypted connection.
+      DBM_SESSION_HTTPS_ONLY: "${DBM_SESSION_HTTPS_ONLY:-false}"
+      # Encrypts backups at rest (AES-256). Generate with `openssl rand -base64 32`
+      # and keep it safe - losing it makes existing backups permanently unrecoverable.
+      DBM_ENCRYPTION_KEY: "${DBM_ENCRYPTION_KEY:-}"
+      # Only needed for the Google Drive / OneDrive "sign in" storage targets:
       # the address you use to reach this app in a browser, and the OAuth app
       # credentials from Google Cloud Console / Azure (see README "Google
       # Drive/OneDrive einrichten").
-      # DBM_PUBLIC_URL: "http://192.168.1.10:8420"
-      # DBM_GOOGLE_CLIENT_ID: ""
-      # DBM_GOOGLE_CLIENT_SECRET: ""
-      # DBM_MS_CLIENT_ID: ""
-      # DBM_MS_CLIENT_SECRET: ""
+      DBM_PUBLIC_URL: "${DBM_PUBLIC_URL:-}"
+      DBM_GOOGLE_CLIENT_ID: "${DBM_GOOGLE_CLIENT_ID:-}"
+      DBM_GOOGLE_CLIENT_SECRET: "${DBM_GOOGLE_CLIENT_SECRET:-}"
+      DBM_MS_CLIENT_ID: "${DBM_MS_CLIENT_ID:-}"
+      DBM_MS_CLIENT_SECRET: "${DBM_MS_CLIENT_SECRET:-}"
     volumes:
       # Docker Engine API socket - required to inspect/backup/restore containers.
       - /var/run/docker.sock:/var/run/docker.sock

@@ -284,7 +284,8 @@ async function dashboardPage() {
   const [overview, backupsData, jobsData] = await Promise.all([
     api("/api/settings/overview"), api("/api/backups"), api("/api/jobs"),
   ]);
-  const allRecords = Object.values(backupsData.groups).flat();
+  const allRecords = Object.entries(backupsData.groups).flatMap(([name, versions]) =>
+    versions.map((v) => ({ ...v, name })));
   const totalBackups = allRecords.length;
   const lastBackup = allRecords.sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
 
