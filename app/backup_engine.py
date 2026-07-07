@@ -18,14 +18,19 @@ import datetime
 import json
 import shutil
 import tarfile
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Iterator, Optional
 
 from app import encryption
 from app.config import BACKUPS_DIR, DOCKER_HELPER_IMAGE
 from app.docker_client import get_client
+
+# (target_type, config_json, target_id) - passed down from routers/scheduler,
+# which already have DB access to resolve a StorageTarget. When set, volume
+# archives are streamed straight to this target instead of ever touching
+# local disk (see iter_volume_tar_chunks / stream_volume_to_target below).
+StreamTarget = tuple[str, str, int]
 
 ProgressCallback = Callable[[int, str, Optional[int]], None]
 
@@ -50,6 +55,10 @@ class BackupResult:
     # invisible in the UI, never deletable, and never subject to retention,
     # even though they still consume real disk space).
     member_results: list["BackupResult"] = field(default_factory=list)
+    # Set when volumes were streamed directly to a storage target instead of
+    # being written locally - restore/delete need to know to fetch/remove them
+    # from there instead of expecting a local volumes/*.tar.gz file.
+    streamed_target_id: Optional[int] = None
 
 
 def _timestamp() -> str:
@@ -68,38 +77,58 @@ def sanitize_name(name: str) -> str:
     return "".join(c if c.isalnum() or c in ("-", "_", ".") else "_" for c in name)
 
 
-def backup_volume_to_file(volume_name: str, dest_tar_gz: Path) -> None:
-    """Tar up a named Docker volume's contents using a disposable helper container.
+def iter_volume_tar_chunks(volume_name: str) -> Iterator[bytes]:
+    """Streams a tar.gz of a named Docker volume's contents straight from a
+    disposable helper container's stdout - no bind mount involved at all.
 
-    Uses only the Docker API (no host-side tar dependency), so this works
-    identically on Linux, Windows (Docker Desktop) and NAS Docker engines.
+    This app talks to the Docker daemon over the host's docker.sock rather
+    than running its own nested daemon ("Docker outside of Docker"), so a
+    bind-mount path handed to containers.run() is resolved by the daemon
+    against the *host* filesystem, not this container's own - a local
+    tempfile path would silently resolve to an unrelated, auto-created host
+    directory instead of the one this process can see. Reading the archive
+    off the container's stdout instead sidesteps that entirely, and as a
+    bonus lets the data be streamed directly to a storage target without ever
+    touching local disk (see stream_volume_to_target).
     """
     client = get_client()
+    container = client.containers.run(
+        DOCKER_HELPER_IMAGE,
+        command=["tar", "czf", "-", "-C", "/data", "."],
+        volumes={volume_name: {"bind": "/data", "mode": "ro"}},
+        detach=True,
+    )
+    try:
+        yield from container.logs(stream=True, stdout=True, stderr=False)
+        result = container.wait()
+        status = result.get("StatusCode", 0) if isinstance(result, dict) else result
+        if status != 0:
+            raise RuntimeError(f"Volume archive helper container for '{volume_name}' exited with status {status}")
+    finally:
+        try:
+            container.remove(force=True)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def backup_volume_to_file(volume_name: str, dest_tar_gz: Path) -> None:
+    """Tar up a named Docker volume's contents into a local file."""
     dest_tar_gz.parent.mkdir(parents=True, exist_ok=True)
-    # This app talks to the Docker daemon over the host's docker.sock (it doesn't
-    # run its own nested daemon), so any bind-mount path handed to
-    # containers.run() is resolved by the daemon against the *host* filesystem,
-    # not this container's own filesystem. The default tempfile location (/tmp)
-    # only exists inside this container, so the helper container below would
-    # silently write into an unrelated, auto-created host directory instead -
-    # the resulting archive would then never be found afterwards. BACKUPS_DIR is
-    # bind-mounted from the host (see docker-compose.yml), so a temp dir under
-    # it resolves to the same real location for both this container and the
-    # daemon/helper container.
-    staging_root = BACKUPS_DIR / ".tmp"
-    staging_root.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(dir=staging_root) as tmp:
-        tmp_path = Path(tmp)
-        client.containers.run(
-            DOCKER_HELPER_IMAGE,
-            command=["tar", "czf", "/backup/archive.tar.gz", "-C", "/data", "."],
-            volumes={
-                volume_name: {"bind": "/data", "mode": "ro"},
-                str(tmp_path): {"bind": "/backup", "mode": "rw"},
-            },
-            remove=True,
-        )
-        shutil.move(str(tmp_path / "archive.tar.gz"), str(dest_tar_gz))
+    with open(dest_tar_gz, "wb") as f:
+        for chunk in iter_volume_tar_chunks(volume_name):
+            f.write(chunk)
+
+
+def stream_volume_to_target(volume_name: str, target_type: str, config_json: str, relative_path: str) -> None:
+    """Tar up a named Docker volume's contents and upload it straight to a
+    storage target, without ever writing the archive to local disk. Note:
+    this bypasses DBM_ENCRYPTION_KEY at-rest encryption entirely, since that
+    only ever applies to files that get written locally first - only use this
+    for targets you trust on their own (private LAN NAS, server-side
+    encryption, etc.)."""
+    from app import storage_sync
+    storage_sync.stream_upload_to_target(target_type, config_json, relative_path,
+                                          iter_volume_tar_chunks(volume_name))
 
 
 def restore_volume_from_file(volume_name: str, src_tar_gz: Path) -> None:
@@ -117,7 +146,8 @@ def restore_volume_from_file(volume_name: str, src_tar_gz: Path) -> None:
 
 
 def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
-                      on_progress: ProgressCallback = _noop_progress) -> BackupResult:
+                      on_progress: ProgressCallback = _noop_progress,
+                      stream_target: Optional[StreamTarget] = None) -> BackupResult:
     client = get_client()
     container = client.containers.get(container_id_or_name)
     attrs = container.attrs
@@ -163,9 +193,16 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
         for mount in volume_mounts:
             vol_name = mount["Name"]
             step += 1
-            on_progress(step, f"Archiving volume {vol_name}", total_steps)
             volume_names.append(vol_name)
-            backup_volume_to_file(vol_name, volumes_dir / f"{sanitize_name(vol_name)}.tar.gz")
+            vol_filename = f"{sanitize_name(vol_name)}.tar.gz"
+            if stream_target:
+                target_type, target_config_json, _target_id = stream_target
+                on_progress(step, f"Streaming volume {vol_name} to storage target", total_steps)
+                relative_path = f"{sanitize_name(name)}/{ts}/volumes/{vol_filename}"
+                stream_volume_to_target(vol_name, target_type, target_config_json, relative_path)
+            else:
+                on_progress(step, f"Archiving volume {vol_name}", total_steps)
+                backup_volume_to_file(vol_name, volumes_dir / vol_filename)
 
         step += 1
         on_progress(step, "Finalizing", total_steps)
@@ -177,6 +214,7 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
             "volumes": volume_names,
             "created_at": datetime.datetime.utcnow().isoformat() + "Z",
             "docker_api_version": client.version().get("ApiVersion"),
+            "streamed_target_id": stream_target[2] if stream_target else None,
         }
         (backup_dir / "meta.json").write_text(json.dumps(meta, indent=2))
 
@@ -190,7 +228,8 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
             encryption.encrypt_directory_in_place(backup_dir, on_progress=encrypt_progress)
 
         size = dir_size_bytes(backup_dir)
-        return BackupResult(ok=True, name=name, path=backup_dir, size_bytes=size, containers=[name])
+        return BackupResult(ok=True, name=name, path=backup_dir, size_bytes=size, containers=[name],
+                             streamed_target_id=stream_target[2] if stream_target else None)
     except Exception as exc:  # noqa: BLE001
         # Don't leave a half-written backup directory (partial image.tar, etc.) behind -
         # it would be unusable but still count toward disk usage forever, since a
@@ -212,7 +251,8 @@ def list_landscape_containers(project_filter: Optional[str] = None) -> list:
 
 def backup_landscape(dest_root: Path = BACKUPS_DIR, project_filter: Optional[str] = None,
                       label: Optional[str] = None,
-                      on_progress: ProgressCallback = _noop_progress) -> BackupResult:
+                      on_progress: ProgressCallback = _noop_progress,
+                      stream_target: Optional[StreamTarget] = None) -> BackupResult:
     containers = list_landscape_containers(project_filter)
     ts = _timestamp()
     landscape_name = label or (project_filter or "landscape")
@@ -225,7 +265,7 @@ def backup_landscape(dest_root: Path = BACKUPS_DIR, project_filter: Optional[str
     total = max(len(containers), 1)
     for idx, c in enumerate(containers, start=1):
         on_progress(idx, f"Backing up {c.name} ({idx}/{total})", total)
-        result = backup_container(c.name, dest_root)
+        result = backup_container(c.name, dest_root, stream_target=stream_target)
         member_names.append(result.name)
         member_results.append(result)
         if not result.ok:
@@ -255,6 +295,7 @@ def backup_landscape(dest_root: Path = BACKUPS_DIR, project_filter: Optional[str
         ok=ok, name=landscape_name, path=landscape_dir, size_bytes=size,
         error="; ".join(errors) if errors else None, containers=member_names,
         member_results=member_results,
+        streamed_target_id=stream_target[2] if stream_target else None,
     )
 
 

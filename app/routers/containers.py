@@ -41,13 +41,16 @@ def list_containers(user: User = Depends(get_current_user)):
     return {"containers": result, "projects": projects}
 
 
-def _run_container_backup_job(job_id: str, container_name: str, storage_target_ids: Optional[list[int]]):
+def _run_container_backup_job(job_id: str, container_name: str, storage_target_ids: Optional[list[int]],
+                               stream_volumes_target_id: Optional[int] = None):
     db = SessionLocal()
     try:
         def progress(step, name, total=None):
             job_tracker.update_progress(job_id, step, name, total)
 
-        result = backup_engine.backup_container(container_name, BACKUPS_DIR, on_progress=progress)
+        stream_target = storage_sync.resolve_stream_target(db, stream_volumes_target_id)
+        result = backup_engine.backup_container(container_name, BACKUPS_DIR, on_progress=progress,
+                                                 stream_target=stream_target)
         record = BackupRecord(
             backup_type="container",
             name=result.name,
@@ -56,6 +59,7 @@ def _run_container_backup_job(job_id: str, container_name: str, storage_target_i
             error=result.error,
             size_bytes=result.size_bytes,
             containers_json=json.dumps(result.containers),
+            streamed_target_id=result.streamed_target_id,
         )
         db.add(record)
         db.commit()
@@ -81,6 +85,7 @@ def _run_container_backup_job(job_id: str, container_name: str, storage_target_i
 
 class ContainerBackupPayload(BaseModel):
     storage_target_ids: Optional[list[int]] = None
+    stream_volumes_target_id: Optional[int] = None
 
 
 @router.post("/{name}/backup")
@@ -88,7 +93,9 @@ def backup_container_now(name: str, payload: ContainerBackupPayload = ContainerB
                           user: User = Depends(get_current_user)):
     job = job_tracker.create_job("backup", name, total_steps=1)
     thread = threading.Thread(
-        target=_run_container_backup_job, args=(job.id, name, payload.storage_target_ids), daemon=True,
+        target=_run_container_backup_job,
+        args=(job.id, name, payload.storage_target_ids, payload.stream_volumes_target_id),
+        daemon=True,
     )
     thread.start()
     return {"job_id": job.id}

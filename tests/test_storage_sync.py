@@ -1,8 +1,13 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from app.config import BACKUPS_DIR
-from app.storage_sync import _relative_key, check_target_connection, delete_from_target, sync_local_path
+from app.storage_sync import (
+    _relative_key, check_target_connection, delete_from_target, download_from_target,
+    stream_upload_to_target, sync_local_path,
+)
 
 
 def test_sync_local_path_copies_tree(tmp_path: Path):
@@ -59,3 +64,33 @@ def test_delete_from_target_local_path_removes_synced_copy(tmp_path: Path):
 def test_delete_from_target_local_path_missing_copy_is_a_noop(tmp_path: Path):
     dest_root = tmp_path / "remote4"
     delete_from_target("local_path", json.dumps({"path": str(dest_root)}), "never-synced/v1")  # must not raise
+
+
+def test_stream_upload_to_target_local_path_writes_chunks(tmp_path: Path):
+    dest_root = tmp_path / "remote5"
+    stream_upload_to_target(
+        "local_path", json.dumps({"path": str(dest_root)}), "app/v1/volumes/data.tar.gz",
+        iter([b"hello ", b"world"]),
+    )
+    assert (dest_root / "app/v1/volumes/data.tar.gz").read_bytes() == b"hello world"
+
+
+def test_stream_upload_to_target_rejects_unsupported_type():
+    with pytest.raises(ValueError):
+        stream_upload_to_target("google_drive", "{}", "app/v1/volumes/data.tar.gz", iter([b"x"]))
+
+
+def test_download_from_target_local_path_roundtrip(tmp_path: Path):
+    dest_root = tmp_path / "remote6"
+    stream_upload_to_target(
+        "local_path", json.dumps({"path": str(dest_root)}), "app/v1/volumes/data.tar.gz",
+        iter([b"payload-bytes"]),
+    )
+    downloaded = tmp_path / "downloaded.tar.gz"
+    download_from_target("local_path", json.dumps({"path": str(dest_root)}), "app/v1/volumes/data.tar.gz", downloaded)
+    assert downloaded.read_bytes() == b"payload-bytes"
+
+
+def test_download_from_target_rejects_unsupported_type(tmp_path: Path):
+    with pytest.raises(ValueError):
+        download_from_target("onedrive", "{}", "app/v1/volumes/data.tar.gz", tmp_path / "out.tar.gz")

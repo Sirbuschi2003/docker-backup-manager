@@ -1,5 +1,8 @@
+import json
 from pathlib import Path
 from unittest.mock import MagicMock
+
+import pytest
 
 import app.backup_engine as backup_engine
 from app.backup_engine import BackupResult, sanitize_name, dir_size_bytes
@@ -21,31 +24,66 @@ def test_dir_size_bytes(tmp_path: Path):
     assert dir_size_bytes(tmp_path) == 11
 
 
-def test_backup_volume_to_file_stages_under_backups_dir(tmp_path: Path, monkeypatch):
-    from app.config import BACKUPS_DIR
+def _fake_helper_container(chunks, status_code=0):
+    """Builds a MagicMock container as returned by client.containers.run(detach=True):
+    .logs(stream=True) yields the given chunks, .wait() reports status_code."""
+    container = MagicMock()
+    container.logs.return_value = iter(chunks)
+    container.wait.return_value = {"StatusCode": status_code}
+    return container
 
-    captured = {}
 
-    def fake_run(image, command=None, volumes=None, remove=None):
-        # Simulate what the real helper container would do: write the archive
-        # into whichever host path was bind-mounted at /backup.
-        captured["volumes"] = volumes
-        host_backup_path = next(k for k, v in volumes.items() if v["bind"] == "/backup")
-        (Path(host_backup_path) / "archive.tar.gz").write_bytes(b"fake-tar-data")
-
+def test_iter_volume_tar_chunks_yields_container_stdout(monkeypatch):
+    container = _fake_helper_container([b"chunk1", b"chunk2"])
     client = MagicMock()
-    client.containers.run.side_effect = fake_run
+    client.containers.run.return_value = container
+    monkeypatch.setattr(backup_engine, "get_client", lambda: client)
+
+    chunks = list(backup_engine.iter_volume_tar_chunks("some-volume"))
+
+    assert chunks == [b"chunk1", b"chunk2"]
+    # No bind mount at all - just the read-only volume, avoiding the host-path
+    # resolution problem entirely (see module docstring on iter_volume_tar_chunks).
+    run_kwargs = client.containers.run.call_args.kwargs
+    assert run_kwargs["volumes"] == {"some-volume": {"bind": "/data", "mode": "ro"}}
+    container.remove.assert_called_once_with(force=True)
+
+
+def test_iter_volume_tar_chunks_raises_on_nonzero_exit(monkeypatch):
+    container = _fake_helper_container([b"partial"], status_code=1)
+    client = MagicMock()
+    client.containers.run.return_value = container
+    monkeypatch.setattr(backup_engine, "get_client", lambda: client)
+
+    with pytest.raises(RuntimeError):
+        list(backup_engine.iter_volume_tar_chunks("some-volume"))
+    container.remove.assert_called_once_with(force=True)
+
+
+def test_backup_volume_to_file_writes_streamed_chunks(tmp_path: Path, monkeypatch):
+    container = _fake_helper_container([b"fake-", b"tar-data"])
+    client = MagicMock()
+    client.containers.run.return_value = container
     monkeypatch.setattr(backup_engine, "get_client", lambda: client)
 
     dest = tmp_path / "vol.tar.gz"
     backup_engine.backup_volume_to_file("some-volume", dest)
 
     assert dest.read_bytes() == b"fake-tar-data"
-    host_backup_path = next(k for k, v in captured["volumes"].items() if v["bind"] == "/backup")
-    # Must be under BACKUPS_DIR (bind-mounted from the host) so the Docker
-    # daemon and this container resolve the same real directory - not under
-    # the system temp dir, which only exists inside this container.
-    assert Path(host_backup_path).resolve().is_relative_to(BACKUPS_DIR.resolve())
+
+
+def test_stream_volume_to_target_uploads_without_local_file(tmp_path: Path, monkeypatch):
+    container = _fake_helper_container([b"fake-", b"tar-data"])
+    client = MagicMock()
+    client.containers.run.return_value = container
+    monkeypatch.setattr(backup_engine, "get_client", lambda: client)
+
+    dest = tmp_path / "remote" / "vol.tar.gz"
+    backup_engine.stream_volume_to_target(
+        "some-volume", "local_path", json.dumps({"path": str(tmp_path / "remote")}), "vol.tar.gz",
+    )
+
+    assert dest.read_bytes() == b"fake-tar-data"
 
 
 def test_backup_container_removes_partial_dir_on_failure(tmp_path: Path, monkeypatch):
@@ -75,7 +113,8 @@ def test_backup_landscape_carries_member_results_for_tracking(tmp_path: Path, mo
         "app-a": BackupResult(ok=True, name="app-a", path=tmp_path / "app-a" / "v1", size_bytes=123),
         "app-b": BackupResult(ok=False, name="app-b", path=tmp_path / "app-b" / "v1", error="boom"),
     }
-    monkeypatch.setattr(backup_engine, "backup_container", lambda name, dest_root: canned_results[name])
+    monkeypatch.setattr(backup_engine, "backup_container",
+                         lambda name, dest_root, stream_target=None: canned_results[name])
 
     result = backup_engine.backup_landscape(dest_root=tmp_path)
 

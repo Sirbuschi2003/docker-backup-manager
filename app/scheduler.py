@@ -36,11 +36,14 @@ def run_schedule(schedule_id: int):
             job_tracker.update_progress(job.id, step, name, total)
 
         try:
+            stream_target = storage_sync.resolve_stream_target(db, sched.stream_volumes_target_id)
             if sched.target_type == "container":
-                result = backup_engine.backup_container(sched.target_ref, BACKUPS_DIR, on_progress=progress)
+                result = backup_engine.backup_container(sched.target_ref, BACKUPS_DIR, on_progress=progress,
+                                                          stream_target=stream_target)
             else:
                 result = backup_engine.backup_landscape(BACKUPS_DIR, project_filter=sched.project_filter,
-                                                          label=sched.name, on_progress=progress)
+                                                          label=sched.name, on_progress=progress,
+                                                          stream_target=stream_target)
 
             record = BackupRecord(
                 backup_type=sched.target_type,
@@ -50,6 +53,7 @@ def run_schedule(schedule_id: int):
                 error=result.error,
                 size_bytes=result.size_bytes,
                 containers_json=json.dumps(result.containers),
+                streamed_target_id=result.streamed_target_id,
             )
             db.add(record)
             db.commit()
@@ -63,6 +67,7 @@ def run_schedule(schedule_id: int):
                     backup_type="container", name=member.name, path=str(member.path),
                     status="ok" if member.ok else "failed", error=member.error,
                     size_bytes=member.size_bytes, containers_json=json.dumps([member.name]),
+                    streamed_target_id=member.streamed_target_id,
                 ))
             db.commit()
 
@@ -108,7 +113,10 @@ def _apply_retention(db, sched: Schedule):
         if r.id not in prune_ids:
             continue
         try:
-            for target_id in json.loads(r.synced_target_ids or "[]"):
+            target_ids_to_clean = set(json.loads(r.synced_target_ids or "[]"))
+            if r.streamed_target_id is not None:
+                target_ids_to_clean.add(r.streamed_target_id)
+            for target_id in target_ids_to_clean:
                 target = db.query(StorageTarget).filter(StorageTarget.id == target_id).first()
                 if not target:
                     continue

@@ -284,6 +284,180 @@ def delete_from_target(target_type: str, config_json: str, relative_key: str) ->
     handler(config, relative_key)
 
 
+class _ChunkIteratorReader:
+    """Minimal file-like adapter so a plain iterator of bytes chunks (as
+    produced by backup_engine.iter_volume_tar_chunks) can be handed to APIs
+    that expect a .read(size) method, e.g. boto3's upload_fileobj."""
+
+    def __init__(self, chunks):
+        self._chunks = iter(chunks)
+        self._buffer = b""
+
+    def read(self, size: int = -1) -> bytes:
+        while size < 0 or len(self._buffer) < size:
+            try:
+                self._buffer += next(self._chunks)
+            except StopIteration:
+                break
+        if size < 0:
+            data, self._buffer = self._buffer, b""
+        else:
+            data, self._buffer = self._buffer[:size], self._buffer[size:]
+        return data
+
+
+def _stream_upload_local_path(config: dict, relative_path: str, chunks) -> None:
+    dest = Path(config["path"]) / relative_path
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with open(dest, "wb") as f:
+        for chunk in chunks:
+            f.write(chunk)
+
+
+def _stream_upload_s3(config: dict, relative_path: str, chunks) -> None:
+    import boto3
+
+    session = boto3.session.Session(
+        aws_access_key_id=config["access_key"],
+        aws_secret_access_key=config["secret_key"],
+        region_name=config.get("region") or None,
+    )
+    s3 = session.client("s3", endpoint_url=config.get("endpoint_url") or None)
+    key = "/".join(filter(None, [config.get("prefix", "").strip("/"), relative_path]))
+    s3.upload_fileobj(_ChunkIteratorReader(chunks), config["bucket"], key)
+
+
+def _stream_upload_smb(config: dict, relative_path: str, chunks) -> None:
+    import smbclient
+
+    _smb_register_session(config)
+    remote_root = _smb_remote_root(config, "")
+    remote_path = remote_root + "\\" + relative_path.replace("/", "\\")
+    remote_dir = remote_path.rsplit("\\", 1)[0]
+    smbclient.makedirs(remote_dir, exist_ok=True)
+    with smbclient.open_file(remote_path, mode="wb") as dst:
+        for chunk in chunks:
+            dst.write(chunk)
+
+
+def _stream_upload_rclone(config: dict, relative_path: str, chunks) -> None:
+    remote = config["remote"]
+    remote_path = config.get("remote_path", "").strip("/")
+    dest = f"{remote}:{remote_path}/{relative_path}".replace("\\", "/")
+    proc = subprocess.Popen(
+        ["rclone", "rcat", dest, "--config", RCLONE_CONFIG_PATH],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    try:
+        for chunk in chunks:
+            proc.stdin.write(chunk)
+        proc.stdin.close()
+        stderr = proc.stderr.read()
+        code = proc.wait(timeout=3600)
+        if code != 0:
+            raise RuntimeError(f"rclone rcat failed: {stderr.decode(errors='replace').strip()}")
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+
+STREAM_UPLOAD_HANDLERS = {
+    "local_path": _stream_upload_local_path,
+    "smb": _stream_upload_smb,
+    "s3": _stream_upload_s3,
+    "rclone": _stream_upload_rclone,
+}
+
+
+def stream_upload_to_target(target_type: str, config_json: str, relative_path: str, chunks) -> None:
+    """Uploads a stream of bytes chunks straight to a storage target, without
+    ever writing it to local disk first. Not supported for google_drive /
+    onedrive (their upload session APIs need a file size or seekable content
+    up front) - use a regular synced target for those instead."""
+    handler = STREAM_UPLOAD_HANDLERS.get(target_type)
+    if not handler:
+        raise ValueError(
+            f"Direktes Streaming wird für Zieltyp '{target_type}' nicht unterstützt "
+            "(nur lokaler Pfad, SMB, S3 und rclone)."
+        )
+    config = json.loads(config_json or "{}")
+    handler(config, relative_path, chunks)
+
+
+def resolve_stream_target(db, target_id: Optional[int]):
+    """Looks up a StorageTarget for direct-volume-streaming, returning the
+    (type, config_json, id) tuple backup_engine's stream_target expects, or
+    None if unset/not found/disabled."""
+    if target_id is None:
+        return None
+    from app.models import StorageTarget
+    target = db.query(StorageTarget).filter(
+        StorageTarget.id == target_id, StorageTarget.enabled == True,  # noqa: E712
+    ).first()
+    if not target:
+        return None
+    return (target.type, target.config_json, target.id)
+
+
+def _download_local_path(config: dict, relative_path: str, dest_path: Path) -> None:
+    shutil.copy2(Path(config["path"]) / relative_path, dest_path)
+
+
+def _download_s3(config: dict, relative_path: str, dest_path: Path) -> None:
+    import boto3
+
+    session = boto3.session.Session(
+        aws_access_key_id=config["access_key"],
+        aws_secret_access_key=config["secret_key"],
+        region_name=config.get("region") or None,
+    )
+    s3 = session.client("s3", endpoint_url=config.get("endpoint_url") or None)
+    key = "/".join(filter(None, [config.get("prefix", "").strip("/"), relative_path]))
+    s3.download_file(config["bucket"], key, str(dest_path))
+
+
+def _download_smb(config: dict, relative_path: str, dest_path: Path) -> None:
+    import smbclient
+
+    _smb_register_session(config)
+    remote_root = _smb_remote_root(config, "")
+    remote_path = remote_root + "\\" + relative_path.replace("/", "\\")
+    with smbclient.open_file(remote_path, mode="rb") as src, open(dest_path, "wb") as dst:
+        shutil.copyfileobj(src, dst)
+
+
+def _download_rclone(config: dict, relative_path: str, dest_path: Path) -> None:
+    remote = config["remote"]
+    remote_path = config.get("remote_path", "").strip("/")
+    src = f"{remote}:{remote_path}/{relative_path}".replace("\\", "/")
+    proc = subprocess.run(
+        ["rclone", "copyto", src, str(dest_path), "--config", RCLONE_CONFIG_PATH],
+        capture_output=True, text=True, timeout=3600,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"rclone copyto failed: {proc.stderr.strip() or proc.stdout.strip()}")
+
+
+DOWNLOAD_HANDLERS = {
+    "local_path": _download_local_path,
+    "smb": _download_smb,
+    "s3": _download_s3,
+    "rclone": _download_rclone,
+}
+
+
+def download_from_target(target_type: str, config_json: str, relative_path: str, dest_path: Path) -> None:
+    """Downloads a single file previously written via stream_upload_to_target
+    to a local path - used to restore a volume that was streamed directly to
+    a target rather than kept locally."""
+    handler = DOWNLOAD_HANDLERS.get(target_type)
+    if not handler:
+        raise ValueError(f"Download wird für Zieltyp '{target_type}' nicht unterstützt.")
+    config = json.loads(config_json or "{}")
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    handler(config, relative_path, dest_path)
+
+
 def sync_to_all_targets(backup_path: Path, on_progress=None) -> list[dict]:
     """Runs after a successful ad-hoc (manually triggered) backup: syncs to
     every enabled storage target. Scheduled backups instead use

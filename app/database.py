@@ -28,11 +28,15 @@ def _add_missing_columns():
                 conn.execute(text("ALTER TABLE schedules ADD COLUMN storage_target_ids TEXT NOT NULL DEFAULT '[]'"))
             if "project_filter" not in existing:
                 conn.execute(text("ALTER TABLE schedules ADD COLUMN project_filter TEXT"))
+            if "stream_volumes_target_id" not in existing:
+                conn.execute(text("ALTER TABLE schedules ADD COLUMN stream_volumes_target_id INTEGER"))
 
         if "backup_records" in tables:
             existing = {col["name"] for col in inspector.get_columns("backup_records")}
             if "synced_target_ids" not in existing:
                 conn.execute(text("ALTER TABLE backup_records ADD COLUMN synced_target_ids TEXT"))
+            if "streamed_target_id" not in existing:
+                conn.execute(text("ALTER TABLE backup_records ADD COLUMN streamed_target_id INTEGER"))
 
 
 def init_db():

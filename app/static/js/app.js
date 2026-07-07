@@ -370,7 +370,7 @@ async function pickStorageTargetsAndRun(title, runFn) {
   try { storageTargets = (await api("/api/settings/storage-targets")).targets; } catch (e) {}
   if (!storageTargets.length) {
     // Nothing configured - nothing to choose, just run against the local backup store.
-    await runFn(null);
+    await runFn(null, null);
     return;
   }
   const targetsHtml = storageTargets.map((t) => `
@@ -379,6 +379,10 @@ async function pickStorageTargetsAndRun(title, runFn) {
       ${t.name} <span class="muted" style="font-size:.78rem">(${t.type})</span>
       ${t.enabled ? "" : '<span class="badge neutral">deaktiviert</span>'}
     </label>`).join("");
+  const STREAMABLE_TYPES = ["local_path", "smb", "s3", "rclone"];
+  const streamTargetOptionsHtml = storageTargets
+    .filter((t) => STREAMABLE_TYPES.includes(t.type) && t.enabled)
+    .map((t) => `<option value="${t.id}">${t.name} (${t.type})</option>`).join("");
   const overlay = h(`
     <div class="modal-overlay">
       <div class="modal">
@@ -386,6 +390,18 @@ async function pickStorageTargetsAndRun(title, runFn) {
         <div class="field">
           <label>Zusätzlich hochladen nach (neben dem lokalen Speicher)</label>
           <div>${targetsHtml}</div>
+        </div>
+        <div class="field">
+          <label>Volumes direkt streamen, ohne lokal zu speichern (optional)</label>
+          <select id="b-stream-target">
+            <option value="">Nein - lokal speichern (Standard)</option>
+            ${streamTargetOptionsHtml}
+          </select>
+          <div class="muted" style="font-size:.75rem; margin-top:4px;">
+            Für große Volumes bei wenig lokalem Speicherplatz. Umgeht die AES-256-Verschlüsselung
+            dieser App (die greift nur bei lokal geschriebenen Dateien) - nur bei vertrauenswürdigem
+            Ziel nutzen. Nur lokaler Pfad, SMB, S3 und rclone unterstützt.
+          </div>
         </div>
         <div class="row-actions">
           <button class="btn" id="cancel-btn">Abbrechen</button>
@@ -397,8 +413,10 @@ async function pickStorageTargetsAndRun(title, runFn) {
   overlay.querySelector("#cancel-btn").addEventListener("click", () => overlay.remove());
   overlay.querySelector("#start-btn").addEventListener("click", async () => {
     const ids = Array.from(overlay.querySelectorAll(".b-storage-target:checked")).map((el) => parseInt(el.value, 10));
+    const streamTargetVal = overlay.querySelector("#b-stream-target").value;
+    const streamTargetId = streamTargetVal ? parseInt(streamTargetVal, 10) : null;
     overlay.remove();
-    await runFn(ids);
+    await runFn(ids, streamTargetId);
   });
   document.body.appendChild(overlay);
 }
@@ -431,11 +449,12 @@ async function containersPage() {
       <td><button class="btn">Backup jetzt</button></td>
     </tr>`);
     row.querySelector("button").addEventListener("click", async (e) => {
-      await pickStorageTargetsAndRun(`Backup für ${c.name}`, async (storageTargetIds) => {
+      await pickStorageTargetsAndRun(`Backup für ${c.name}`, async (storageTargetIds, streamTargetId) => {
         e.target.disabled = true;
         try {
           await api(`/api/containers/${encodeURIComponent(c.name)}/backup`, {
-            method: "POST", body: JSON.stringify({ storage_target_ids: storageTargetIds }),
+            method: "POST",
+            body: JSON.stringify({ storage_target_ids: storageTargetIds, stream_volumes_target_id: streamTargetId }),
           });
           toast(`Backup für ${c.name} gestartet`);
           pollGlobalJobs();
@@ -447,10 +466,11 @@ async function containersPage() {
   });
 
   wrap.querySelector("#backup-all-btn").addEventListener("click", async () => {
-    await pickStorageTargetsAndRun("Gesamte Landschaft sichern", async (storageTargetIds) => {
+    await pickStorageTargetsAndRun("Gesamte Landschaft sichern", async (storageTargetIds, streamTargetId) => {
       try {
         await api("/api/backups/landscape", {
-          method: "POST", body: JSON.stringify({ storage_target_ids: storageTargetIds }),
+          method: "POST",
+          body: JSON.stringify({ storage_target_ids: storageTargetIds, stream_volumes_target_id: streamTargetId }),
         });
         toast("Landschafts-Backup gestartet");
         pollGlobalJobs();
@@ -562,11 +582,16 @@ function openRestoreModal(version) {
 
 async function openLandscapeMembersModal(version) {
   const data = await api(`/api/backups/${version.id}/members`);
+  const restorableCount = data.members.filter((m) => m.backup_id).length;
   const overlay = h(`
     <div class="modal-overlay">
       <div class="modal">
         <h3>Landschafts-Mitglieder</h3>
-        <p class="muted">Jedes Mitglied wird als eigenes Container-Backup wiederhergestellt.</p>
+        <p class="muted">Jedes Mitglied wird als eigenes Container-Backup wiederhergestellt. Du kannst
+          das ganze Projekt auf einmal wiederherstellen oder gezielt nur einen einzelnen Container.</p>
+        <div class="row-actions" style="justify-content:flex-start; margin-bottom:12px;">
+          <button class="btn primary" id="restore-all-btn" ${restorableCount ? "" : "disabled"}>Ganzes Projekt wiederherstellen (${restorableCount})</button>
+        </div>
         <div id="members-list"></div>
         <div class="row-actions"><button class="btn" id="close-btn">Schließen</button></div>
       </div>
@@ -584,6 +609,18 @@ async function openLandscapeMembersModal(version) {
       openRestoreModal({ id: m.backup_id, created_at: version.created_at });
     });
     list.appendChild(row);
+  });
+  overlay.querySelector("#restore-all-btn").addEventListener("click", async () => {
+    if (!confirm(`Alle ${restorableCount} Container dieses Projekts wiederherstellen? Bestehende Container mit demselben Namen werden dabei nicht automatisch ersetzt (Namenskonflikt möglich).`)) return;
+    overlay.remove();
+    for (const m of data.members) {
+      if (!m.backup_id) continue;
+      try {
+        await api(`/api/backups/${m.backup_id}/restore`, { method: "POST", body: JSON.stringify({ start: true }) });
+      } catch (e) { toast(`${m.container_name}: ${e.message}`, "error"); }
+    }
+    toast(`Wiederherstellung für ${restorableCount} Container gestartet`);
+    pollGlobalJobs();
   });
   overlay.querySelector("#close-btn").addEventListener("click", () => overlay.remove());
   document.body.appendChild(overlay);
@@ -695,6 +732,13 @@ async function openScheduleModal(existing) {
         </label>`).join("")
     : `<p class="muted" style="font-size:.85rem">Noch keine Speicherziele konfiguriert. Unter <strong>Einstellungen</strong> anlegen (SMB, S3, Google Drive/OneDrive via rclone, ...).</p>`;
 
+  // Only these target types can receive a live byte-stream; Google Drive/OneDrive
+  // need a known size/seekable content up front, so they're not offered here.
+  const STREAMABLE_TYPES = ["local_path", "smb", "s3", "rclone"];
+  const streamableTargets = storageTargets.filter((t) => STREAMABLE_TYPES.includes(t.type) && t.enabled);
+  const streamTargetOptionsHtml = streamableTargets.map((t) =>
+    `<option value="${t.id}">${t.name} (${t.type})</option>`).join("");
+
   const cronFields = parseCronToFrequencyFields(existing ? existing.cron_expression : null);
   const timeValue = `${String(cronFields.hour).padStart(2, "0")}:${String(cronFields.minute).padStart(2, "0")}`;
 
@@ -754,6 +798,20 @@ async function openScheduleModal(existing) {
           <label>Speicherziele für diesen Zeitplan (wohin zusätzlich hochgeladen wird)</label>
           <div id="s-storage-targets">${targetsHtml}</div>
         </div>
+        <div class="field">
+          <label>Volumes direkt streamen, ohne lokal zu speichern (optional)</label>
+          <select id="s-stream-target">
+            <option value="">Nein - lokal speichern (Standard)</option>
+            ${streamTargetOptionsHtml}
+          </select>
+          <div class="muted" style="font-size:.75rem; margin-top:4px;">
+            Für große Volumes (z. B. Immich), wenn lokal nicht genug Speicherplatz frei ist: die
+            Volume-Daten gehen direkt an das gewählte Ziel, ohne je auf der lokalen Platte zu landen.
+            <strong>Wichtig:</strong> dabei wird die AES-256-Verschlüsselung dieser App umgangen (die
+            greift nur bei lokal geschriebenen Dateien) - nur nutzen, wenn du dem Zielsystem selbst
+            vertraust (z. B. eigenes NAS im LAN). Nur lokaler Pfad, SMB, S3 und rclone unterstützt.
+          </div>
+        </div>
         <div class="row-actions">
           <button class="btn" id="cancel-btn">Abbrechen</button>
           <button class="btn primary" id="save-btn">${existing ? "Speichern" : "Erstellen"}</button>
@@ -770,6 +828,9 @@ async function openScheduleModal(existing) {
       const cb = overlay.querySelector(`.s-storage-target[value="${id}"]`);
       if (cb) cb.checked = true;
     });
+    if (existing.stream_volumes_target_id) {
+      overlay.querySelector("#s-stream-target").value = String(existing.stream_volumes_target_id);
+    }
   }
   overlay.querySelector("#s-target-type").addEventListener("change", (e) => {
     overlay.querySelector("#s-container-field").style.display = e.target.value === "container" ? "block" : "none";
@@ -816,6 +877,8 @@ async function openScheduleModal(existing) {
       retention_count: parseInt(overlay.querySelector("#s-ret-count").value || "0", 10),
       retention_days: parseInt(overlay.querySelector("#s-ret-days").value || "0", 10),
       storage_target_ids: storageTargetIds,
+      stream_volumes_target_id: overlay.querySelector("#s-stream-target").value
+        ? parseInt(overlay.querySelector("#s-stream-target").value, 10) : null,
       enabled: existing ? existing.enabled : true,
     };
     try {

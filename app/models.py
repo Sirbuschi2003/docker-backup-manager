@@ -30,6 +30,7 @@ class BackupRecord(Base):
     source_image = Column(String(512), nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     synced_target_ids = Column(Text, nullable=True)  # JSON list of StorageTarget ids this version was uploaded to
+    streamed_target_id = Column(Integer, nullable=True)  # set if volumes were streamed directly to this StorageTarget instead of being written locally
 
 
 class StorageTarget(Base):
@@ -58,6 +59,7 @@ class Schedule(Base):
     retention_count = Column(Integer, default=7)
     retention_days = Column(Integer, default=0)
     storage_target_ids = Column(Text, nullable=False, default="[]")  # JSON list of StorageTarget ids to sync to
+    stream_volumes_target_id = Column(Integer, nullable=True)  # if set, volumes are streamed directly here instead of being written locally first (bypasses at-rest encryption for volume data)
     enabled = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     last_run_at = Column(DateTime, nullable=True)

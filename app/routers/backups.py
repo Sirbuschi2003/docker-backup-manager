@@ -56,7 +56,10 @@ def delete_backup(backup_id: int, db: Session = Depends(get_db), user: User = De
         raise HTTPException(404, "Backup not found")
 
     remote_errors = []
-    for target_id in json.loads(record.synced_target_ids or "[]"):
+    target_ids_to_clean = set(json.loads(record.synced_target_ids or "[]"))
+    if record.streamed_target_id is not None:
+        target_ids_to_clean.add(record.streamed_target_id)
+    for target_id in target_ids_to_clean:
         target = db.query(StorageTarget).filter(StorageTarget.id == target_id).first()
         if not target:
             continue  # target was deleted since - nothing to clean up there
@@ -77,17 +80,21 @@ class LandscapeBackupPayload(BaseModel):
     label: Optional[str] = None
     project_filter: Optional[str] = None
     storage_target_ids: Optional[list[int]] = None
+    stream_volumes_target_id: Optional[int] = None
 
 
 def _run_landscape_job(job_id: str, label: Optional[str], project_filter: Optional[str],
-                        storage_target_ids: Optional[list[int]]):
+                        storage_target_ids: Optional[list[int]],
+                        stream_volumes_target_id: Optional[int] = None):
     db = SessionLocal()
     try:
         def progress(step, name, total=None):
             job_tracker.update_progress(job_id, step, name, total)
 
+        stream_target = storage_sync.resolve_stream_target(db, stream_volumes_target_id)
         result = backup_engine.backup_landscape(BACKUPS_DIR, project_filter=project_filter,
-                                                  label=label, on_progress=progress)
+                                                  label=label, on_progress=progress,
+                                                  stream_target=stream_target)
         record = BackupRecord(
             backup_type="landscape",
             name=result.name,
@@ -96,6 +103,7 @@ def _run_landscape_job(job_id: str, label: Optional[str], project_filter: Option
             error=result.error,
             size_bytes=result.size_bytes,
             containers_json=json.dumps(result.containers),
+            streamed_target_id=result.streamed_target_id,
         )
         db.add(record)
         db.commit()
@@ -110,6 +118,7 @@ def _run_landscape_job(job_id: str, label: Optional[str], project_filter: Option
                 backup_type="container", name=member.name, path=str(member.path),
                 status="ok" if member.ok else "failed", error=member.error,
                 size_bytes=member.size_bytes, containers_json=json.dumps([member.name]),
+                streamed_target_id=member.streamed_target_id,
             ))
         db.commit()
 
@@ -136,7 +145,8 @@ def backup_landscape_now(payload: LandscapeBackupPayload, user: User = Depends(g
     job = job_tracker.create_job("backup", payload.label or "landscape", total_steps=1)
     thread = threading.Thread(
         target=_run_landscape_job,
-        args=(job.id, payload.label, payload.project_filter, payload.storage_target_ids),
+        args=(job.id, payload.label, payload.project_filter, payload.storage_target_ids,
+              payload.stream_volumes_target_id),
         daemon=True,
     )
     thread.start()
@@ -148,12 +158,14 @@ class RestorePayload(BaseModel):
     start: bool = True
 
 
-def _run_restore_job(job_id: str, backup_path: str, new_name: Optional[str], start: bool):
+def _run_restore_job(job_id: str, backup_path: str, new_name: Optional[str], start: bool,
+                      stream_target: Optional[tuple]):
     try:
         def progress(step, name, total=None):
             job_tracker.update_progress(job_id, step, name, total)
 
-        restore_container(Path(backup_path), new_name=new_name, start=start, on_progress=progress)
+        restore_container(Path(backup_path), new_name=new_name, start=start, on_progress=progress,
+                           stream_target=stream_target)
         job_tracker.finish_job(job_id, True)
     except Exception as exc:  # noqa: BLE001
         job_tracker.finish_job(job_id, False, str(exc))
@@ -169,9 +181,12 @@ def restore_backup(backup_id: int, payload: RestorePayload, db: Session = Depend
         raise HTTPException(400, "Only single-container backups can be restored directly; "
                                   "restore each member container of a landscape backup individually")
 
+    stream_target = storage_sync.resolve_stream_target(db, record.streamed_target_id)
     job = job_tracker.create_job("restore", record.name, total_steps=1)
     thread = threading.Thread(
-        target=_run_restore_job, args=(job.id, record.path, payload.new_name, payload.start), daemon=True,
+        target=_run_restore_job,
+        args=(job.id, record.path, payload.new_name, payload.start, stream_target),
+        daemon=True,
     )
     thread.start()
     return {"job_id": job.id}

@@ -1,4 +1,10 @@
-from app.restore_engine import _build_create_kwargs
+import json
+from pathlib import Path
+from unittest.mock import MagicMock
+
+import pytest
+
+from app.restore_engine import _build_create_kwargs, restore_container
 
 
 def test_build_create_kwargs_basic_fields():
@@ -51,3 +57,61 @@ def test_build_create_kwargs_no_restart_policy_when_empty():
     }
     kwargs = _build_create_kwargs(container_json, None, "img")
     assert "restart_policy" not in kwargs
+
+
+def test_restore_container_downloads_streamed_volumes_before_restoring(tmp_path, monkeypatch):
+    import app.restore_engine as restore_engine
+
+    backup_dir = tmp_path / "backups" / "app-streamed" / "v1"
+    backup_dir.mkdir(parents=True)
+    (backup_dir / "container.json").write_text(json.dumps({"Name": "/app", "Config": {}, "HostConfig": {}}))
+    (backup_dir / "image.tar").write_bytes(b"fake-image-tar")
+    (backup_dir / "meta.json").write_text(json.dumps({
+        "volumes": ["data-vol"], "streamed_target_id": 1,
+    }))
+
+    # Volume lives only on the streamed target, uploaded there directly.
+    remote_root = tmp_path / "remote"
+    from app.storage_sync import stream_upload_to_target
+    relative_key = "app-streamed/v1"
+    stream_upload_to_target(
+        "local_path", json.dumps({"path": str(remote_root)}), f"{relative_key}/volumes/data-vol.tar.gz",
+        iter([b"volume-payload"]),
+    )
+    monkeypatch.setattr(restore_engine.storage_sync, "_relative_key", lambda p: relative_key)
+
+    client = MagicMock()
+    loaded_image = MagicMock()
+    loaded_image.tags = ["app:latest"]
+    client.images.load.return_value = [loaded_image]
+    client.networks.list.return_value = []
+    client.volumes.list.return_value = []
+    monkeypatch.setattr(restore_engine, "get_client", lambda: client)
+
+    restored_volumes = {}
+
+    def fake_restore_volume_from_file(vol_name, vol_file):
+        restored_volumes[vol_name] = Path(vol_file).read_bytes()
+
+    monkeypatch.setattr(restore_engine, "restore_volume_from_file", fake_restore_volume_from_file)
+
+    stream_target = ("local_path", json.dumps({"path": str(remote_root)}), 1)
+    restore_container(backup_dir, stream_target=stream_target)
+
+    assert restored_volumes == {"data-vol": b"volume-payload"}
+    client.volumes.create.assert_called_once_with(name="data-vol")
+
+
+def test_restore_container_raises_clearly_if_streamed_target_missing(tmp_path, monkeypatch):
+    import app.restore_engine as restore_engine
+
+    backup_dir = tmp_path / "backups" / "app-streamed" / "v1"
+    backup_dir.mkdir(parents=True)
+    (backup_dir / "container.json").write_text(json.dumps({"Name": "/app", "Config": {}, "HostConfig": {}}))
+    (backup_dir / "image.tar").write_bytes(b"fake-image-tar")
+    (backup_dir / "meta.json").write_text(json.dumps({"volumes": ["data-vol"], "streamed_target_id": 1}))
+
+    monkeypatch.setattr(restore_engine, "get_client", lambda: MagicMock())
+
+    with pytest.raises(RuntimeError):
+        restore_container(backup_dir, stream_target=None)

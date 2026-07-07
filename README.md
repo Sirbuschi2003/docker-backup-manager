@@ -37,6 +37,14 @@ purem Docker Engine auf Linux.
   nötig), ein bereits gemounteter SMB/NFS-Pfad, S3-kompatibel (AWS S3, MinIO,
   Wasabi, ...) nativ, sowie über das mitgelieferte `rclone` Dropbox, Box,
   pCloud, Mega, SFTP, WebDAV und viele weitere Cloud-Anbieter
+- **Direktes Volume-Streaming** (optional, pro Zeitplan oder manuellem Backup):
+  Volume-Daten gehen direkt an ein Speicherziel (lokaler Pfad, SMB, S3 oder
+  rclone), ohne je lokal zwischengespeichert zu werden — praktisch bei großen
+  Volumes (z. B. Immich-Mediatheken), wenn lokal nicht genug Speicherplatz
+  frei ist. Umgeht dabei die AES-256-Verschlüsselung dieser App (siehe unten).
+- Landschafts-/Projekt-Backups lassen sich **als Ganzes wiederherstellen**
+  (ein Klick stellt alle Mitglieds-Container wieder her) oder gezielt nur
+  einzelne Container daraus
 - Modernes, responsives Web-UI (hell/dunkel), Login-geschützt mit
   Brute-Force-Sperre nach Fehlversuchen
 
@@ -275,6 +283,29 @@ werden alle aktivierten Speicherziele synchronisiert; bei Zeitplänen nur die
 dort ausgewählten. Der Fortschritt aller laufenden Backup-/Restore-/Sync-Jobs
 erscheint als Ladebalken unten links auf jeder Seite der App.
 
+### Volumes direkt streamen (ohne lokalen Speicherbedarf)
+
+Standardmäßig wird ein Backup zuerst **komplett lokal** unter `/data/backups`
+geschrieben und erst danach an Speicherziele hochgeladen — dafür muss lokal
+so viel Platz frei sein wie das größte Backup selbst. Bei großen Volumes
+(z. B. eine Immich-Mediathek) kann das zu viel sein.
+
+Sowohl beim manuellen Backup („Backup jetzt“ / „Gesamte Landschaft sichern“)
+als auch im Zeitplan-Dialog gibt es dafür die Option **„Volumes direkt
+streamen, ohne lokal zu speichern“**: die Volume-Daten (Image und Metadaten
+bleiben weiterhin klein und lokal) gehen dann direkt aus dem
+Sicherungs-Hilfscontainer heraus an das gewählte Speicherziel, ohne je auf
+der lokalen Platte zu landen. Unterstützt für **lokalen Pfad, SMB, S3 und
+rclone** (Google Drive/OneDrive nicht, da deren Upload-API eine bekannte
+Dateigröße vorab braucht).
+
+**Wichtig:** Dabei wird die AES-256-Verschlüsselung dieser App für die
+Volume-Daten komplett umgangen (die greift nur bei Dateien, die erst lokal
+geschrieben werden) — nur nutzen, wenn du dem Zielsystem selbst vertraust
+(z. B. eigenes NAS im LAN mit SMB3-Verschlüsselung). Wiederherstellen und
+Löschen funktionieren transparent wie gewohnt: die App lädt die Volume-Daten
+bei Bedarf automatisch vom Speicherziel herunter bzw. löscht sie dort.
+
 ### Google Drive/OneDrive einrichten
 
 Damit der „Mit Google/Microsoft anmelden"-Button funktioniert, muss einmalig
@@ -327,7 +358,10 @@ den „Anmelden"-Button tatsächlich einloggt.
    (oder Backup-Ordner in das bestehende `data/backups`-Verzeichnis kopieren).
 3. In der UI unter **Backups** die passende Version auswählen und
    „Wiederherstellen" klicken. Container-Name kann dabei angepasst werden,
-   z. B. um Namenskonflikte zu vermeiden.
+   z. B. um Namenskonflikte zu vermeiden. Bei einem Landschafts-/Projekt-Backup
+   („Mitglieder"-Button) kannst du entweder **„Ganzes Projekt wiederherstellen"**
+   klicken, um alle Mitglieds-Container auf einmal wiederherzustellen, oder
+   gezielt nur einen einzelnen Container aus der Liste auswählen.
 
 Hinweis: Die Wiederherstellung deckt die gängigen Container-Einstellungen ab
 (Umgebungsvariablen, Ports, Volumes/Binds, Restart-Policy, Netzwerke,

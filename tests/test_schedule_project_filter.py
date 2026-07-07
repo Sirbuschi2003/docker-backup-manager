@@ -45,7 +45,7 @@ def test_run_schedule_passes_project_filter_to_backup_landscape(monkeypatch):
 
     captured = {}
 
-    def fake_backup_landscape(dest_root, project_filter=None, label=None, on_progress=None):
+    def fake_backup_landscape(dest_root, project_filter=None, label=None, on_progress=None, stream_target=None):
         captured["project_filter"] = project_filter
         return BackupResult(ok=True, name=label, path=dest_root / "_landscapes" / "nextcloud" / "v1", size_bytes=1)
 
