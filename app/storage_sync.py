@@ -203,6 +203,87 @@ def sync_to_target(backup_path: Path, target_type: str, config_json: str) -> Non
     handler(Path(backup_path), config)
 
 
+def _delete_local_path(config: dict, relative_key: str) -> None:
+    dest = Path(config["path"]) / relative_key
+    if dest.exists():
+        shutil.rmtree(dest)
+
+
+def _delete_s3(config: dict, relative_key: str) -> None:
+    import boto3
+
+    session = boto3.session.Session(
+        aws_access_key_id=config["access_key"],
+        aws_secret_access_key=config["secret_key"],
+        region_name=config.get("region") or None,
+    )
+    s3 = session.client("s3", endpoint_url=config.get("endpoint_url") or None)
+    bucket = config["bucket"]
+    prefix = "/".join(filter(None, [config.get("prefix", "").strip("/"), relative_key]))
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        keys = [{"Key": obj["Key"]} for obj in page.get("Contents", [])]
+        if keys:
+            s3.delete_objects(Bucket=bucket, Delete={"Objects": keys})
+
+
+def _delete_smb(config: dict, relative_key: str) -> None:
+    import smbclient
+
+    _smb_register_session(config)
+    remote_root = _smb_remote_root(config, relative_key)
+    if not smbclient.path.exists(remote_root):
+        return
+    for dirpath, _dirnames, filenames in smbclient.walk(remote_root, topdown=False):
+        for filename in filenames:
+            smbclient.remove(f"{dirpath}\\{filename}")
+        smbclient.rmdir(dirpath)
+
+
+def _delete_rclone(config: dict, relative_key: str) -> None:
+    remote = config["remote"]
+    remote_path = config.get("remote_path", "").strip("/")
+    dest = f"{remote}:{remote_path}/{relative_key}".replace("\\", "/")
+    proc = subprocess.run(
+        ["rclone", "purge", dest, "--config", RCLONE_CONFIG_PATH],
+        capture_output=True, text=True, timeout=300,
+    )
+    if proc.returncode != 0 and "directory not found" not in (proc.stderr or "").lower():
+        raise RuntimeError(f"rclone purge failed: {proc.stderr.strip() or proc.stdout.strip()}")
+
+
+def _delete_google_drive(config: dict, relative_key: str) -> None:
+    from app import oauth_storage
+    oauth_storage.delete_google_drive(config, relative_key)
+
+
+def _delete_onedrive(config: dict, relative_key: str) -> None:
+    from app import oauth_storage
+    oauth_storage.delete_onedrive(config, relative_key)
+
+
+DELETE_HANDLERS = {
+    "local_path": _delete_local_path,
+    "smb": _delete_smb,
+    "s3": _delete_s3,
+    "rclone": _delete_rclone,
+    "google_drive": _delete_google_drive,
+    "onedrive": _delete_onedrive,
+}
+
+
+def delete_from_target(target_type: str, config_json: str, relative_key: str) -> None:
+    """Removes a single backup version's uploaded copy from a storage target.
+    Best-effort by convention of the caller - a missing remote copy (already
+    deleted, sync never completed, ...) should not be treated as fatal by
+    handlers where that's distinguishable, but network/auth errors still raise."""
+    handler = DELETE_HANDLERS.get(target_type)
+    if not handler:
+        raise ValueError(f"Unknown storage target type: {target_type}")
+    config = json.loads(config_json or "{}")
+    handler(config, relative_key)
+
+
 def sync_to_all_targets(backup_path: Path, on_progress=None) -> list[dict]:
     """Runs after a successful ad-hoc (manually triggered) backup: syncs to
     every enabled storage target. Scheduled backups instead use
@@ -240,12 +321,12 @@ def _sync_to_targets(backup_path: Path, target_ids: Optional[list[int]], on_prog
                 sync_to_target(backup_path, target.type, target.config_json)
                 target.last_sync_status = "ok"
                 target.last_sync_error = None
-                results.append({"target": target.name, "ok": True})
+                results.append({"target": target.name, "target_id": target.id, "ok": True})
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Storage sync failed for target %s", target.name)
                 target.last_sync_status = "failed"
                 target.last_sync_error = str(exc)
-                results.append({"target": target.name, "ok": False, "error": str(exc)})
+                results.append({"target": target.name, "target_id": target.id, "ok": False, "error": str(exc)})
             target.last_sync_at = datetime.datetime.utcnow()
             db.commit()
     finally:

@@ -27,6 +27,11 @@ def _add_missing_columns():
             if "storage_target_ids" not in existing:
                 conn.execute(text("ALTER TABLE schedules ADD COLUMN storage_target_ids TEXT NOT NULL DEFAULT '[]'"))
 
+        if "backup_records" in tables:
+            existing = {col["name"] for col in inspector.get_columns("backup_records")}
+            if "synced_target_ids" not in existing:
+                conn.execute(text("ALTER TABLE backup_records ADD COLUMN synced_target_ids TEXT"))
+
 
 def init_db():
     from app import models  # noqa: F401  (ensure models are registered)

@@ -11,8 +11,9 @@ from app import backup_engine, job_tracker, storage_sync
 from app.auth import get_current_user
 from app.config import BACKUPS_DIR
 from app.database import SessionLocal, get_db
-from app.models import BackupRecord, User
+from app.models import BackupRecord, StorageTarget, User
 from app.restore_engine import restore_container
+from app.storage_sync import _relative_key
 
 router = APIRouter(prefix="/api/backups", tags=["backups"])
 
@@ -39,9 +40,22 @@ def delete_backup(backup_id: int, db: Session = Depends(get_db), user: User = De
     record = db.query(BackupRecord).filter(BackupRecord.id == backup_id).first()
     if not record:
         raise HTTPException(404, "Backup not found")
+
+    remote_errors = []
+    for target_id in json.loads(record.synced_target_ids or "[]"):
+        target = db.query(StorageTarget).filter(StorageTarget.id == target_id).first()
+        if not target:
+            continue  # target was deleted since - nothing to clean up there
+        try:
+            storage_sync.delete_from_target(target.type, target.config_json, _relative_key(Path(record.path)))
+        except Exception as exc:  # noqa: BLE001
+            remote_errors.append(f"{target.name}: {exc}")
+
     backup_engine.delete_backup(Path(record.path))
     db.delete(record)
     db.commit()
+    if remote_errors:
+        return {"ok": True, "warning": "Lokal gelöscht, aber nicht überall auf den Speicherzielen: " + "; ".join(remote_errors)}
     return {"ok": True}
 
 
@@ -78,9 +92,11 @@ def _run_landscape_job(job_id: str, label: Optional[str], project_filter: Option
                 job_tracker.update_progress(job_id, 1, label_, 1)
 
             if storage_target_ids is None:
-                storage_sync.sync_to_all_targets(result.path, on_progress=upload_progress)
+                sync_results = storage_sync.sync_to_all_targets(result.path, on_progress=upload_progress)
             else:
-                storage_sync.sync_to_selected_targets(result.path, storage_target_ids, on_progress=upload_progress)
+                sync_results = storage_sync.sync_to_selected_targets(result.path, storage_target_ids, on_progress=upload_progress)
+            record.synced_target_ids = json.dumps([r["target_id"] for r in sync_results if r["ok"]])
+            db.commit()
 
         job_tracker.finish_job(job_id, result.ok, result.error, record.id)
     except Exception as exc:  # noqa: BLE001

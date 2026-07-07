@@ -20,12 +20,13 @@ purem Docker Engine auf Linux.
 - **Wiederherstellung** auf demselben oder einem anderen Host/OS
 - **Zeitbasierte Versionierung**: jedes Backup ist eine eigene Zeitstempel-Version,
   nichts wird überschrieben
-- **Zeitpläne** (Täglich/Wöchentlich/Monatlich + Uhrzeit, kein Cron-Wissen
-  nötig) pro Container oder für die gesamte Landschaft, inkl. automatischer
-  **Aufbewahrungsrichtlinie** (Anzahl Versionen und/oder Alter in Tagen) und
-  pro Zeitplan frei wählbaren **Speicherzielen** (z. B. ein Zeitplan nach
-  Google Drive, ein anderer nach SMB, ein dritter nur lokal)
-- **Löschen** einzelner Backup-Versionen
+- **Zeitpläne** (Alle X Stunden/Täglich/Wöchentlich/Monatlich + Uhrzeit, kein
+  Cron-Wissen nötig) pro Container oder für die gesamte Landschaft, inkl.
+  automatischer **Aufbewahrungsrichtlinie** (Anzahl Versionen und/oder Alter in
+  Tagen) und pro Zeitplan frei wählbaren **Speicherzielen** (z. B. ein
+  Zeitplan nach Google Drive, ein anderer nach SMB, ein dritter nur lokal)
+- **Löschen** einzelner Backup-Versionen — entfernt auch die zugehörigen
+  Kopien auf allen Speicherzielen, auf die diese Version hochgeladen wurde
 - **Verschlüsselung at rest**: Backups werden optional mit AES-256 verschlüsselt
   auf der Platte abgelegt (Schlüssel nur per Umgebungsvariable, nie in der DB)
 - **Fortschrittsanzeige** (Ladebalken + geschätzte Restzeit) bei laufenden
@@ -214,10 +215,13 @@ da die Backup/Restore-Funktionen die Docker-API benötigen.
    konfiguriert, fragt die App dabei kurz nach, an welche(s) davon zusätzlich
    hochgeladen werden soll (Checkboxen, alle aktivierten vorausgewählt).
 3. Unter **Backups** siehst du alle Versionen je Container/Landschaft,
-   kannst wiederherstellen, herunterladen (Dateisystem) oder löschen.
+   kannst wiederherstellen, herunterladen (Dateisystem) oder löschen (löscht
+   automatisch auch die Kopien auf allen Speicherzielen mit, auf die diese
+   Version hochgeladen wurde).
 4. Unter **Zeitpläne** legst du Zeitpläne mit Aufbewahrungsrichtlinie an
-   (Häufigkeit Täglich/Wöchentlich/Monatlich + Uhrzeit auswählen — kein
-   Cron-Wissen nötig, z. B. täglich 03:00 Uhr, letzte 7 Versionen behalten)
+   (Häufigkeit Alle X Stunden/Täglich/Wöchentlich/Monatlich + Uhrzeit
+   auswählen — kein Cron-Wissen nötig, z. B. täglich 03:00 Uhr, letzte 7
+   Versionen behalten)
    **und wählst dort
    explizit aus, an welche(s) Speicherziel(e) dieser Zeitplan hochladen soll**
    (Checkboxen im Zeitplan-Dialog — leer lassen für „nur lokal“). So kannst du

@@ -223,6 +223,39 @@ def _gdrive_resolve_folder(access_token: str, folder_path: str) -> str:
     return folder_id
 
 
+def _gdrive_find_folder(access_token: str, parent_id: str, name: str) -> Optional[str]:
+    headers = {"Authorization": f"Bearer {access_token}"}
+    query = (
+        f"name = '{name}' and '{parent_id}' in parents and "
+        "mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+    )
+    resp = requests.get("https://www.googleapis.com/drive/v3/files",
+                         headers=headers, params={"q": query, "fields": "files(id)"}, timeout=15)
+    resp.raise_for_status()
+    files = resp.json().get("files", [])
+    return files[0]["id"] if files else None
+
+
+def delete_google_drive(config: dict, relative_key: str) -> None:
+    access_token = _refresh_access_token("google", config["refresh_token"])
+    folder_id = _gdrive_find_folder_chain(access_token, config.get("folder_path", ""), relative_key)
+    if not folder_id:
+        return  # nothing uploaded (or already deleted) - nothing to do
+    resp = requests.delete(f"https://www.googleapis.com/drive/v3/files/{folder_id}",
+                            headers={"Authorization": f"Bearer {access_token}"}, timeout=30)
+    if resp.status_code not in (204, 404):
+        resp.raise_for_status()
+
+
+def _gdrive_find_folder_chain(access_token: str, folder_path: str, relative_key: str) -> Optional[str]:
+    folder_id = "root"
+    for part in [p for p in folder_path.split("/") if p] + [p for p in relative_key.split("/") if p]:
+        folder_id = _gdrive_find_folder(access_token, folder_id, part)
+        if not folder_id:
+            return None
+    return folder_id
+
+
 def check_google_drive_connection(config: dict) -> None:
     access_token = _refresh_access_token("google", config["refresh_token"])
     _gdrive_resolve_folder(access_token, config.get("folder_path", ""))
@@ -262,6 +295,17 @@ def check_onedrive_connection(config: dict) -> None:
     resp = requests.get("https://graph.microsoft.com/v1.0/me/drive",
                          headers={"Authorization": f"Bearer {access_token}"}, timeout=15)
     resp.raise_for_status()
+
+
+def delete_onedrive(config: dict, relative_key: str) -> None:
+    access_token = _refresh_access_token("onedrive", config["refresh_token"])
+    folder_path = config.get("folder_path", "").strip("/")
+    remote_parts = [p for p in [folder_path, relative_key] if p and p != "."]
+    remote_path = "/".join(remote_parts)
+    resp = requests.delete(f"https://graph.microsoft.com/v1.0/me/drive/root:/{remote_path}",
+                            headers={"Authorization": f"Bearer {access_token}"}, timeout=30)
+    if resp.status_code not in (204, 404):
+        resp.raise_for_status()
 
 
 def sync_onedrive(backup_path: Path, config: dict) -> None:

@@ -29,6 +29,7 @@ class BackupRecord(Base):
     containers_json = Column(Text, nullable=True)  # for landscape: JSON list of member container names
     source_image = Column(String(512), nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    synced_target_ids = Column(Text, nullable=True)  # JSON list of StorageTarget ids this version was uploaded to
 
 
 class StorageTarget(Base):

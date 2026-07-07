@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 from app.config import BACKUPS_DIR
-from app.storage_sync import sync_local_path, check_target_connection
+from app.storage_sync import _relative_key, check_target_connection, delete_from_target, sync_local_path
 
 
 def test_sync_local_path_copies_tree(tmp_path: Path):
@@ -40,3 +40,22 @@ def test_check_target_connection_local_path_write_check(tmp_path: Path):
     check_target_connection("local_path", json.dumps({"path": str(target_dir)}))
     assert target_dir.exists()
     assert not (target_dir / ".dbm_write_test").exists()
+
+
+def test_delete_from_target_local_path_removes_synced_copy(tmp_path: Path):
+    backup_dir = BACKUPS_DIR / "app3" / "v1"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    (backup_dir / "f.txt").write_text("data")
+
+    dest_root = tmp_path / "remote3"
+    sync_local_path(backup_dir, {"path": str(dest_root)})
+    relative_key = _relative_key(backup_dir)
+    assert (dest_root / relative_key).exists()
+
+    delete_from_target("local_path", json.dumps({"path": str(dest_root)}), relative_key)
+    assert not (dest_root / relative_key).exists()
+
+
+def test_delete_from_target_local_path_missing_copy_is_a_noop(tmp_path: Path):
+    dest_root = tmp_path / "remote4"
+    delete_from_target("local_path", json.dumps({"path": str(dest_root)}), "never-synced/v1")  # must not raise

@@ -66,9 +66,11 @@ def _run_container_backup_job(job_id: str, container_name: str, storage_target_i
                 job_tracker.update_progress(job_id, 1, label, 1)
 
             if storage_target_ids is None:
-                storage_sync.sync_to_all_targets(result.path, on_progress=upload_progress)
+                sync_results = storage_sync.sync_to_all_targets(result.path, on_progress=upload_progress)
             else:
-                storage_sync.sync_to_selected_targets(result.path, storage_target_ids, on_progress=upload_progress)
+                sync_results = storage_sync.sync_to_selected_targets(result.path, storage_target_ids, on_progress=upload_progress)
+            record.synced_target_ids = json.dumps([r["target_id"] for r in sync_results if r["ok"]])
+            db.commit()
 
         job_tracker.finish_job(job_id, result.ok, result.error, record.id)
     except Exception as exc:  # noqa: BLE001

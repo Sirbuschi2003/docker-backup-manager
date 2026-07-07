@@ -76,12 +76,12 @@ function renderJobCard(job) {
     <div class="card job-card" data-job-id="${job.id}">
       <div class="job-title"><span>${job.kind === "backup" ? "💾" : "♻️"} ${job.label}</span>
         <span class="badge ${statusBadge}">${statusLabel}</span></div>
-      <div class="muted" style="font-size:.8rem">${job.step_name}</div>
+      <div class="muted job-step" style="font-size:.8rem">${job.step_name}</div>
       <div class="progress-wrap">
         <div class="progress-bar"><div style="width:${job.percent}%"></div></div>
         <div class="progress-meta">
-          <span>Schritt ${job.current_step}/${job.total_steps}</span>
-          <span>${job.status === "running"
+          <span class="job-step-count">Schritt ${job.current_step}/${job.total_steps}</span>
+          <span class="job-elapsed">${job.status === "running"
             ? "Verstrichen: " + fmtDuration(job.elapsed_seconds) + (job.eta_seconds != null ? " · ETA " + fmtDuration(job.eta_seconds) : "")
             : fmtDuration(job.elapsed_seconds)}</span>
         </div>
@@ -89,6 +89,28 @@ function renderJobCard(job) {
       ${job.error ? `<div class="error-msg">${job.error}</div>` : ""}
     </div>
   `);
+}
+
+function updateJobCard(card, job) {
+  const statusBadge = job.status === "running" ? "running" : job.status === "success" ? "ok" : "failed";
+  const statusLabel = job.status === "running" ? "läuft" : job.status === "success" ? "fertig" : "fehlgeschlagen";
+  const badge = card.querySelector(".badge");
+  badge.className = `badge ${statusBadge}`;
+  badge.textContent = statusLabel;
+  card.querySelector(".job-step").textContent = job.step_name;
+  card.querySelector(".progress-bar > div").style.width = `${job.percent}%`;
+  card.querySelector(".job-step-count").textContent = `Schritt ${job.current_step}/${job.total_steps}`;
+  card.querySelector(".job-elapsed").textContent = job.status === "running"
+    ? "Verstrichen: " + fmtDuration(job.elapsed_seconds) + (job.eta_seconds != null ? " · ETA " + fmtDuration(job.eta_seconds) : "")
+    : fmtDuration(job.elapsed_seconds);
+  const existingError = card.querySelector(".error-msg");
+  if (job.error && !existingError) {
+    card.appendChild(h(`<div class="error-msg">${job.error}</div>`));
+  } else if (job.error && existingError) {
+    existingError.textContent = job.error;
+  } else if (!job.error && existingError) {
+    existingError.remove();
+  }
 }
 
 async function pollGlobalJobs() {
@@ -110,11 +132,18 @@ async function pollGlobalJobs() {
   }
 
   const visible = jobs.filter((j) => j.status === "running" ||
-    (finishedJobHideAt.has(j.id) && finishedJobHideAt.get(j.id) > now));
+    (finishedJobHideAt.has(j.id) && finishedJobHideAt.get(j.id) > now)).slice(0, 5);
 
   const tray = ensureJobTray();
-  tray.innerHTML = "";
-  visible.slice(0, 5).forEach((job) => tray.appendChild(renderJobCard(job)));
+  const visibleIds = new Set(visible.map((j) => String(j.id)));
+  tray.querySelectorAll(".job-card").forEach((card) => {
+    if (!visibleIds.has(card.dataset.jobId)) card.remove();
+  });
+  visible.forEach((job) => {
+    const existing = tray.querySelector(`.job-card[data-job-id="${job.id}"]`);
+    if (existing) updateJobCard(existing, job);
+    else tray.appendChild(renderJobCard(job));
+  });
 }
 
 function startGlobalJobPoller() {
@@ -440,8 +469,9 @@ async function backupsPage() {
       row.querySelector(".delete-btn").addEventListener("click", async () => {
         if (!confirm(`Backup vom ${fmtDate(v.created_at)} für "${name}" wirklich löschen?`)) return;
         try {
-          await api(`/api/backups/${v.id}`, { method: "DELETE" });
-          toast("Backup gelöscht");
+          const res = await api(`/api/backups/${v.id}`, { method: "DELETE" });
+          if (res.warning) toast(res.warning, "error");
+          else toast("Backup gelöscht");
           navigate("backups");
         } catch (e) { toast(e.message, "error"); }
       });
@@ -522,6 +552,10 @@ function describeCron(cron) {
   const parts = (cron || "").trim().split(/\s+/);
   if (parts.length !== 5) return cron;
   const [minute, hour, dayOfMonth, , dayOfWeek] = parts;
+  const hourlyMatch = /^\*\/(\d+)$/.exec(hour);
+  if (hourlyMatch && dayOfMonth === "*" && dayOfWeek === "*") {
+    return `Alle ${hourlyMatch[1]} Stunden`;
+  }
   const time = `${hour.padStart(2, "0")}:${minute.padStart(2, "0")} Uhr`;
   if (dayOfMonth !== "*") return `Monatlich am ${dayOfMonth}. um ${time}`;
   if (dayOfWeek !== "*") {
@@ -610,12 +644,17 @@ async function openScheduleModal() {
         </div>
         <div class="field"><label>Wie oft?</label>
           <select id="s-freq">
-            <option value="daily">Täglich</option>
+            <option value="hourly">Alle X Stunden</option>
+            <option value="daily" selected>Täglich</option>
             <option value="weekly">Wöchentlich</option>
             <option value="monthly">Monatlich</option>
           </select>
         </div>
-        <div class="field"><label>Uhrzeit</label><input type="time" id="s-time" value="03:00" /></div>
+        <div class="field" id="s-hourly-field" style="display:none">
+          <label>Alle wie viele Stunden?</label>
+          <input type="number" id="s-hour-interval" value="6" min="1" max="23" />
+        </div>
+        <div class="field" id="s-time-field"><label>Uhrzeit</label><input type="time" id="s-time" value="03:00" /></div>
         <div class="field" id="s-weekdays-field" style="display:none">
           <label>An welchen Tagen?</label>
           <div style="display:flex; gap:10px; flex-wrap:wrap;">
@@ -649,6 +688,8 @@ async function openScheduleModal() {
   });
   function updateFrequencyFields() {
     const freq = overlay.querySelector("#s-freq").value;
+    overlay.querySelector("#s-hourly-field").style.display = freq === "hourly" ? "block" : "none";
+    overlay.querySelector("#s-time-field").style.display = freq === "hourly" ? "none" : "block";
     overlay.querySelector("#s-weekdays-field").style.display = freq === "weekly" ? "block" : "none";
     overlay.querySelector("#s-monthday-field").style.display = freq === "monthly" ? "block" : "none";
   }
@@ -656,8 +697,12 @@ async function openScheduleModal() {
   updateFrequencyFields();
 
   function buildCronExpression() {
-    const [hour, minute] = overlay.querySelector("#s-time").value.split(":").map((n) => parseInt(n, 10));
     const freq = overlay.querySelector("#s-freq").value;
+    if (freq === "hourly") {
+      const interval = Math.min(23, Math.max(1, parseInt(overlay.querySelector("#s-hour-interval").value || "6", 10)));
+      return `0 */${interval} * * *`;
+    }
+    const [hour, minute] = overlay.querySelector("#s-time").value.split(":").map((n) => parseInt(n, 10));
     if (freq === "weekly") {
       const days = Array.from(overlay.querySelectorAll(".s-weekday:checked")).map((el) => el.value);
       return `${minute} ${hour} * * ${days.length ? days.join(",") : "0"}`;
@@ -816,10 +861,10 @@ function openStorageTargetModal(existing) {
         <div class="field">
           <label>Freigabename (Share)</label>
           <div style="display:flex; gap:8px;">
-            <input type="text" id="cfg-share" placeholder="backups" value="${cfg.share || ""}" list="cfg-share-list" style="flex:1" />
+            <input type="text" id="cfg-share" placeholder="backups" value="${cfg.share || ""}" style="flex:1" />
             <button type="button" class="btn" id="load-shares-btn">Freigaben anzeigen</button>
           </div>
-          <datalist id="cfg-share-list"></datalist>
+          <div id="cfg-share-results" style="display:flex; flex-wrap:wrap; gap:6px; margin-top:6px;"></div>
           <div class="muted" style="font-size:.75rem; margin-top:4px;">Server, Benutzername und Passwort oben ausfüllen, dann auf "Freigaben anzeigen" klicken.</div>
         </div>
         <div class="field"><label>Unterordner (optional)</label><input type="text" id="cfg-base-path" placeholder="docker-backup-manager" value="${cfg.base_path || ""}" /></div>
@@ -840,9 +885,14 @@ function openStorageTargetModal(existing) {
               port: fieldsEl.querySelector("#cfg-port").value.trim() || "445",
             }),
           });
-          const list = fieldsEl.querySelector("#cfg-share-list");
-          list.innerHTML = res.shares.map((s) => `<option value="${s}"></option>`).join("");
-          if (res.shares.length) toast(`${res.shares.length} Freigabe(n) gefunden`);
+          const results = fieldsEl.querySelector("#cfg-share-results");
+          results.innerHTML = "";
+          res.shares.forEach((s) => {
+            const chip = h(`<button type="button" class="btn" style="padding:4px 10px; font-size:.85rem;">${s}</button>`);
+            chip.addEventListener("click", () => { fieldsEl.querySelector("#cfg-share").value = s; });
+            results.appendChild(chip);
+          });
+          if (res.shares.length) toast(`${res.shares.length} Freigabe(n) gefunden - anklicken zum Übernehmen`);
           else toast("Keine Freigaben gefunden", "error");
         } catch (e) {
           toast(e.message, "error");
