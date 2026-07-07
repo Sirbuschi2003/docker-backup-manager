@@ -20,21 +20,24 @@ purem Docker Engine auf Linux.
 - **Wiederherstellung** auf demselben oder einem anderen Host/OS
 - **Zeitbasierte Versionierung**: jedes Backup ist eine eigene Zeitstempel-Version,
   nichts wird überschrieben
-- **Zeitpläne** (Cron) pro Container oder für die gesamte Landschaft, inkl.
-  automatischer **Aufbewahrungsrichtlinie** (Anzahl Versionen und/oder Alter in Tagen)
-  und pro Zeitplan frei wählbaren **Speicherzielen** (z. B. ein Zeitplan nach
+- **Zeitpläne** (Täglich/Wöchentlich/Monatlich + Uhrzeit, kein Cron-Wissen
+  nötig) pro Container oder für die gesamte Landschaft, inkl. automatischer
+  **Aufbewahrungsrichtlinie** (Anzahl Versionen und/oder Alter in Tagen) und
+  pro Zeitplan frei wählbaren **Speicherzielen** (z. B. ein Zeitplan nach
   Google Drive, ein anderer nach SMB, ein dritter nur lokal)
 - **Löschen** einzelner Backup-Versionen
 - **Verschlüsselung at rest**: Backups werden optional mit AES-256 verschlüsselt
   auf der Platte abgelegt (Schlüssel nur per Umgebungsvariable, nie in der DB)
 - **Fortschrittsanzeige** (Ladebalken + geschätzte Restzeit) bei laufenden
   Backup-/Restore-Jobs, sichtbar auf jeder Seite der App
-- **Externe Speicherziele** für Offsite-Kopien: echtes **SMB/CIFS** mit
-  Benutzername/Passwort (kein Host-Mount nötig), ein bereits gemounteter
-  SMB/NFS-Pfad, S3-kompatibel (AWS S3, MinIO, Wasabi, ...) nativ, sowie über
-  das mitgelieferte `rclone` **Google Drive, OneDrive, Dropbox, Box, pCloud,
-  Mega, SFTP, WebDAV** und viele weitere Cloud-Anbieter
-- Modernes, responsives Web-UI (hell/dunkel), Login-geschützt
+- **Externe Speicherziele** für Offsite-Kopien: **Google Drive/OneDrive**
+  per Login-Button (kein rclone.conf nötig), echtes **SMB/CIFS** mit
+  Benutzername/Passwort und Freigaben-Auflistung per Klick (kein Host-Mount
+  nötig), ein bereits gemounteter SMB/NFS-Pfad, S3-kompatibel (AWS S3, MinIO,
+  Wasabi, ...) nativ, sowie über das mitgelieferte `rclone` Dropbox, Box,
+  pCloud, Mega, SFTP, WebDAV und viele weitere Cloud-Anbieter
+- Modernes, responsives Web-UI (hell/dunkel), Login-geschützt mit
+  Brute-Force-Sperre nach Fehlversuchen
 
 ## Architektur
 
@@ -234,9 +237,15 @@ da die Backup/Restore-Funktionen die Docker-API benötigen.
      (siehe auskommentierte Zeile in `docker-compose.yml`).
    - **S3**: Bucket, Endpoint (leer lassen für AWS S3), Access/Secret Key
      eintragen.
-   - **rclone (Google Drive, OneDrive, Dropbox, Box, pCloud, Mega, SFTP,
-     WebDAV, ...)**: einmalig per `rclone config` (z. B. lokal `rclone config`
-     ausführen), die erzeugte `rclone.conf` als Volume
+   - **Google Drive / OneDrive (empfohlen)**: einfach auf „Mit Google/Microsoft
+     anmelden" klicken und im sich öffnenden Popup einloggen — kein
+     `rclone config`, keine Konfigurationsdatei nötig. Voraussetzung: der
+     Betreiber hat einmalig eine OAuth-App registriert (siehe
+     [„Google Drive/OneDrive einrichten"](#google-driveonedrive-einrichten)
+     unten) und die zugehörigen Umgebungsvariablen gesetzt.
+   - **rclone (Dropbox, Box, pCloud, Mega, SFTP, WebDAV, ...)**: für alles,
+     wofür es keine eigene Option gibt — einmalig per `rclone config` (z. B.
+     lokal `rclone config` ausführen), die erzeugte `rclone.conf` als Volume
      `./rclone.conf:/data/rclone.conf:ro` einbinden, danach im UI den
      Remote-Namen + Zielpfad eintragen.
 
@@ -244,6 +253,49 @@ Bei manuell ausgelösten Backups („Backup jetzt“, „Gesamte Landschaft sich
 werden alle aktivierten Speicherziele synchronisiert; bei Zeitplänen nur die
 dort ausgewählten. Der Fortschritt aller laufenden Backup-/Restore-/Sync-Jobs
 erscheint als Ladebalken unten links auf jeder Seite der App.
+
+### Google Drive/OneDrive einrichten
+
+Damit der „Mit Google/Microsoft anmelden"-Button funktioniert, muss einmalig
+(pro Installation, nicht pro Nutzer) eine OAuth-App registriert werden — das
+verlangen Google und Microsoft so, damit nicht jede beliebige App auf fremde
+Konten zugreifen kann. Danach melden sich beliebig viele Nutzer der App ganz
+normal per Login-Fenster an, ohne selbst etwas registrieren zu müssen.
+
+**Voraussetzung für beide:** `DBM_PUBLIC_URL` muss auf die Adresse gesetzt
+sein, unter der du die Web-UI im Browser aufrufst (z. B.
+`http://192.168.1.10:8420` oder `https://backup.deinedomain.de`) — sie wird
+für die OAuth-Rücksprungadresse gebraucht.
+
+**Google Drive:**
+1. [Google Cloud Console](https://console.cloud.google.com/) → neues Projekt
+   anlegen → „APIs & Services" → „Library" → **Google Drive API** aktivieren.
+2. „APIs & Services" → „OAuth consent screen": Typ „External" (oder
+   „Internal" bei Google Workspace), App-Namen vergeben. Solange die App
+   „Testing" bleibt, musst du dein eigenes Google-Konto unter „Test users"
+   eintragen.
+3. „Credentials" → „Create Credentials" → „OAuth client ID" → Typ
+   „Web application" → unter „Authorized redirect URIs"
+   `<DBM_PUBLIC_URL>/api/settings/oauth/google/callback` eintragen (z. B.
+   `http://192.168.1.10:8420/api/settings/oauth/google/callback`).
+4. Client-ID + Client-Secret als `DBM_GOOGLE_CLIENT_ID` /
+   `DBM_GOOGLE_CLIENT_SECRET` setzen, Container neu starten.
+
+**OneDrive:**
+1. [Azure Portal](https://portal.azure.com/) → „App registrations" → „New
+   registration". Als Redirect-URI (Typ „Web")
+   `<DBM_PUBLIC_URL>/api/settings/oauth/onedrive/callback` eintragen.
+2. „Certificates & secrets" → „New client secret" erzeugen.
+3. „API permissions" → „Microsoft Graph" → „Delegated permissions" →
+   `Files.ReadWrite` und `offline_access` hinzufügen.
+4. Application (client) ID + das erzeugte Secret als `DBM_MS_CLIENT_ID` /
+   `DBM_MS_CLIENT_SECRET` setzen, Container neu starten. Für private
+   Microsoft-Konten (nicht nur Firmenkonten) `DBM_MS_TENANT=common` lassen
+   (Standard).
+
+Beide Zugangsdaten (Client-ID/-Secret) sind reine App-Registrierungen, keine
+persönlichen Zugangsdaten — sie erlauben nichts, solange sich niemand über
+den „Anmelden"-Button tatsächlich einloggt.
 
 ## Wiederherstellung auf einem anderen System
 

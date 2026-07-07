@@ -15,10 +15,14 @@ Supported target types:
   - s3: any S3-compatible object storage (AWS S3, MinIO, Wasabi, Backblaze B2,
     Ceph RGW, ...) via boto3, using access key/secret + endpoint URL.
   - rclone: shells out to the bundled `rclone` binary for every other backend
-    rclone supports out of the box - most notably Google Drive and OneDrive,
-    but also SFTP, WebDAV, B2, etc. The admin configures the remote once
-    (rclone.conf, mounted as a secret or built via `rclone config`) and just
-    references its name + a destination path here.
+    rclone supports out of the box - most notably SFTP, WebDAV, B2, etc. The
+    admin configures the remote once (rclone.conf, mounted as a secret or
+    built via `rclone config`) and just references its name + a destination
+    path here.
+  - google_drive / onedrive: OAuth-based targets set up entirely from the web
+    UI ("Mit Google/Microsoft anmelden") - no rclone.conf, no terminal. See
+    app/oauth_storage.py for the actual OAuth + upload implementation; this
+    module just dispatches to it.
 """
 from __future__ import annotations
 
@@ -171,11 +175,23 @@ def sync_rclone(backup_path: Path, config: dict) -> None:
         raise RuntimeError(f"rclone failed: {proc.stderr.strip() or proc.stdout.strip()}")
 
 
+def sync_google_drive(backup_path: Path, config: dict) -> None:
+    from app import oauth_storage
+    oauth_storage.sync_google_drive(backup_path, config)
+
+
+def sync_onedrive(backup_path: Path, config: dict) -> None:
+    from app import oauth_storage
+    oauth_storage.sync_onedrive(backup_path, config)
+
+
 SYNC_HANDLERS = {
     "local_path": sync_local_path,
     "smb": sync_smb,
     "s3": sync_s3,
     "rclone": sync_rclone,
+    "google_drive": sync_google_drive,
+    "onedrive": sync_onedrive,
 }
 
 
@@ -269,5 +285,11 @@ def check_target_connection(target_type: str, config_json: str) -> None:
         )
         if proc.returncode != 0:
             raise RuntimeError(proc.stderr.strip() or proc.stdout.strip())
+    elif target_type == "google_drive":
+        from app import oauth_storage
+        oauth_storage.check_google_drive_connection(config)
+    elif target_type == "onedrive":
+        from app import oauth_storage
+        oauth_storage.check_onedrive_connection(config)
     else:
         raise ValueError(f"Unknown storage target type: {target_type}")

@@ -746,7 +746,9 @@ async function settingsPage() {
     local_path: "SMB/NFS-Pfad (lokal gemountet)",
     smb: "SMB/CIFS (Benutzername/Passwort)",
     s3: "S3-kompatibel",
-    rclone: "rclone (Google Drive, OneDrive, ...)",
+    rclone: "rclone (SFTP, WebDAV, B2, ...)",
+    google_drive: "Google Drive",
+    onedrive: "OneDrive",
   };
   if (!targetsData.targets.length) tbody.appendChild(h(`<tr><td colspan="5"><div class="empty-state">Keine externen Ziele konfiguriert</div></td></tr>`));
   targetsData.targets.forEach((t) => {
@@ -788,7 +790,9 @@ function openStorageTargetModal(existing) {
             <option value="smb">SMB/CIFS (Server + Benutzername/Passwort)</option>
             <option value="local_path">Bereits gemounteter Pfad (SMB/NFS am Host)</option>
             <option value="s3">S3-kompatibel (AWS S3, MinIO, Wasabi, ...)</option>
-            <option value="rclone">rclone-Remote (Google Drive, OneDrive, SFTP, ...)</option>
+            <option value="google_drive">Google Drive (Anmelden per Browser)</option>
+            <option value="onedrive">OneDrive (Anmelden per Browser)</option>
+            <option value="rclone">rclone-Remote (SFTP, WebDAV, B2, ...)</option>
           </select>
         </div>
         <div id="t-config-fields"></div>
@@ -800,6 +804,7 @@ function openStorageTargetModal(existing) {
       </div>
     </div>
   `);
+  let oauthPending = null; // { provider, state } once a Google/OneDrive login popup succeeds
   const fieldsEl = overlay.querySelector("#t-config-fields");
   function renderFields(type, cfg) {
     cfg = cfg || {};
@@ -858,11 +863,38 @@ function openStorageTargetModal(existing) {
         <div class="field"><label>Access Key</label><input type="text" id="cfg-access" value="${cfg.access_key || ""}" /></div>
         <div class="field"><label>Secret Key</label><input type="password" id="cfg-secret" value="${cfg.secret_key || ""}" /></div>
         <div class="field"><label>Präfix (optional)</label><input type="text" id="cfg-prefix" value="${cfg.prefix || ""}" /></div>`;
+    } else if (type === "google_drive" || type === "onedrive") {
+      const provider = type === "google_drive" ? "google" : "onedrive";
+      const providerLabel = type === "google_drive" ? "Google" : "Microsoft";
+      const connected = cfg.connected || (oauthPending && oauthPending.state);
+      fieldsEl.innerHTML = `
+        <div class="field">
+          <div id="oauth-status" class="muted" style="margin-bottom:8px;">
+            ${connected
+              ? `✅ Verbunden${cfg.account ? " als <strong>" + cfg.account + "</strong>" : ""}`
+              : "Noch nicht verbunden."}
+          </div>
+          <button type="button" class="btn" id="oauth-connect-btn">${connected ? "Neu verbinden" : "Mit " + providerLabel + " anmelden"}</button>
+        </div>
+        <div class="field"><label>Zielordner (optional, wird angelegt falls nötig)</label>
+          <input type="text" id="cfg-folder-path" placeholder="docker-backups" value="${cfg.folder_path || ""}" /></div>`;
+      fieldsEl.querySelector("#oauth-connect-btn").addEventListener("click", () => {
+        const popup = window.open(`/api/settings/oauth/${provider}/start`, "dbm-oauth", "width=520,height=650");
+        const onMessage = (event) => {
+          if (event.origin !== window.location.origin || !event.data || !event.data.dbmOAuth) return;
+          window.removeEventListener("message", onMessage);
+          if (!event.data.ok) { toast(`Anmeldung fehlgeschlagen: ${event.data.error}`, "error"); return; }
+          oauthPending = { provider, state: event.data.state };
+          toast("Erfolgreich verbunden - Speichern nicht vergessen");
+          renderFields(type, cfg);
+        };
+        window.addEventListener("message", onMessage);
+      });
     } else {
       fieldsEl.innerHTML = `
         <div class="field"><label>rclone Remote-Name (aus rclone.conf)</label><input type="text" id="cfg-remote" placeholder="gdrive" value="${cfg.remote || ""}" /></div>
         <div class="field"><label>Remote-Pfad</label><input type="text" id="cfg-remote-path" placeholder="docker-backups" value="${cfg.remote_path || ""}" /></div>
-        <p class="muted" style="font-size:.8rem">Der Remote muss vorher per <span class="mono">rclone config</span> in der gemounteten rclone.conf eingerichtet sein (unterstützt Google Drive, OneDrive, SFTP, WebDAV, u.v.m.).</p>`;
+        <p class="muted" style="font-size:.8rem">Der Remote muss vorher per <span class="mono">rclone config</span> in der gemounteten rclone.conf eingerichtet sein (unterstützt SFTP, WebDAV, B2, u.v.m. - für Google Drive/OneDrive die eigenen Optionen oben verwenden).</p>`;
     }
   }
   if (existing) {
@@ -895,12 +927,22 @@ function openStorageTargetModal(existing) {
       secret_key: overlay.querySelector("#cfg-secret").value,
       prefix: overlay.querySelector("#cfg-prefix").value.trim(),
     };
+    else if (type === "google_drive" || type === "onedrive") config = {
+      folder_path: overlay.querySelector("#cfg-folder-path").value.trim(),
+    };
     else config = {
       remote: overlay.querySelector("#cfg-remote").value.trim(),
       remote_path: overlay.querySelector("#cfg-remote-path").value.trim(),
     };
     return { type, config };
   }
+
+  function updateTestButtonVisibility() {
+    const isOAuth = ["google_drive", "onedrive"].includes(overlay.querySelector("#t-type").value);
+    overlay.querySelector("#test-btn").style.display = isOAuth ? "none" : "";
+  }
+  updateTestButtonVisibility();
+  overlay.querySelector("#t-type").addEventListener("change", updateTestButtonVisibility);
 
   overlay.querySelector("#cancel-btn").addEventListener("click", () => overlay.remove());
   overlay.querySelector("#test-btn").addEventListener("click", async () => {
@@ -920,10 +962,30 @@ function openStorageTargetModal(existing) {
   });
   overlay.querySelector("#save-btn").addEventListener("click", async () => {
     const { type, config } = readConfig();
-    const payload = {
-      name: overlay.querySelector("#t-name").value.trim() || type, type, config,
-      enabled: existing ? existing.enabled : true,
-    };
+    const name = overlay.querySelector("#t-name").value.trim() || type;
+
+    if (type === "google_drive" || type === "onedrive") {
+      if (oauthPending) {
+        try {
+          await api("/api/settings/storage-targets/oauth-complete", {
+            method: "POST",
+            body: JSON.stringify({
+              state: oauthPending.state, name, folder_path: config.folder_path,
+              target_id: existing ? existing.id : null,
+            }),
+          });
+          overlay.remove();
+          navigate("settings");
+        } catch (e) { toast(e.message, "error"); }
+        return;
+      }
+      if (!existing || !existing.config.connected) {
+        toast("Bitte zuerst über den Button oben anmelden", "error");
+        return;
+      }
+    }
+
+    const payload = { name, type, config, enabled: existing ? existing.enabled : true };
     try {
       if (existing) {
         await api(`/api/settings/storage-targets/${existing.id}`, { method: "PUT", body: JSON.stringify(payload) });

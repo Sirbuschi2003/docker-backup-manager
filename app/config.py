@@ -38,6 +38,17 @@ LOGIN_LOCKOUT_SECONDS = int(os.environ.get("DBM_LOGIN_LOCKOUT_SECONDS", str(5 * 
 
 DOCKER_HELPER_IMAGE = os.environ.get("DBM_HELPER_IMAGE", "alpine:3.20")
 
+# OAuth-based storage targets (Google Drive / OneDrive). PUBLIC_URL is the
+# address the browser uses to reach this app (e.g. "http://192.168.1.10:8420")
+# - needed to build the OAuth redirect URI, since the container can't know
+# its own externally-reachable address on its own.
+PUBLIC_URL = os.environ.get("DBM_PUBLIC_URL", "").rstrip("/")
+GOOGLE_CLIENT_ID = os.environ.get("DBM_GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.environ.get("DBM_GOOGLE_CLIENT_SECRET", "")
+MS_CLIENT_ID = os.environ.get("DBM_MS_CLIENT_ID", "")
+MS_CLIENT_SECRET = os.environ.get("DBM_MS_CLIENT_SECRET", "")
+MS_TENANT = os.environ.get("DBM_MS_TENANT", "common")
+
 DEFAULT_RETENTION_COUNT = int(os.environ.get("DBM_DEFAULT_RETENTION_COUNT", "7"))
 DEFAULT_RETENTION_DAYS = int(os.environ.get("DBM_DEFAULT_RETENTION_DAYS", "0"))  # 0 = disabled
 

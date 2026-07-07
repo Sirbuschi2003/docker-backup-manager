@@ -20,6 +20,15 @@ services:
       # with `openssl rand -base64 32` and keep it safe - losing it makes
       # existing backups permanently unrecoverable.
       # DBM_ENCRYPTION_KEY: ""
+      # Required only for the Google Drive / OneDrive "sign in" storage targets:
+      # the address you use to reach this app in a browser, and the OAuth app
+      # credentials from Google Cloud Console / Azure (see README "Google
+      # Drive/OneDrive einrichten").
+      # DBM_PUBLIC_URL: "http://192.168.1.10:8420"
+      # DBM_GOOGLE_CLIENT_ID: ""
+      # DBM_GOOGLE_CLIENT_SECRET: ""
+      # DBM_MS_CLIENT_ID: ""
+      # DBM_MS_CLIENT_SECRET: ""
     volumes:
       # Docker Engine API socket - required to inspect/backup/restore containers.
       - /var/run/docker.sock:/var/run/docker.sock
