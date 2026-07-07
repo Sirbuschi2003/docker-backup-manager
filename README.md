@@ -230,7 +230,13 @@ da die Backup/Restore-Funktionen die Docker-API benötigen.
    einzelnes Compose-Projekt** einschränken — praktisch für Multi-Container-
    Anwendungen wie Immich oder Nextcloud (App-Server, Datenbank, Redis, ... als
    ein zusammengehöriges Backup, statt Container einzeln oder die komplette
-   Landschaft zu sichern).
+   Landschaft zu sichern). **Wichtig:** Zeitpläne werden standardmäßig in **UTC**
+   ausgewertet, nicht in deiner lokalen Zeit — ohne `DBM_TZ` läuft ein für
+   03:00 Uhr geplantes Backup tatsächlich um 03:00 UTC (in Deutschland je nach
+   Jahreszeit 1–2 Stunden später). Setze `DBM_TZ` auf deine IANA-Zeitzone
+   (z. B. `Europe/Berlin`) und starte den Container neu. Die aktuelle
+   Serverzeit + eingestellte Zeitzone werden zur Kontrolle unter
+   **Einstellungen** live angezeigt.
 5. Unter **Einstellungen** kannst du Speicherziele für Offsite-Kopien anlegen:
    - **SMB/CIFS (empfohlen für Windows-Freigaben/NAS)**: Server, Freigabename,
      Benutzername + Passwort direkt in der App eintragen — kein Host-Mount,

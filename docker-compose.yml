@@ -8,6 +8,10 @@ services:
       - "8420:8420"
     # Uncomment and set any of these if needed (all optional - see README "Sicherheit"):
     # environment:
+      # Important for schedules: without this, cron-based schedules are evaluated
+      # in UTC, so a schedule set for e.g. 03:00 will actually run at 03:00 UTC,
+      # not 03:00 local time. Set to your IANA timezone name.
+      # DBM_TZ: "Europe/Berlin"
       # Optional: signs session cookies. If unset, a random key is generated
       # on first start and persisted as /data/.secret_key - only set this
       # explicitly if you need a stable, self-chosen key (e.g. multiple

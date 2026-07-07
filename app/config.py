@@ -38,6 +38,12 @@ LOGIN_LOCKOUT_SECONDS = int(os.environ.get("DBM_LOGIN_LOCKOUT_SECONDS", str(5 * 
 
 DOCKER_HELPER_IMAGE = os.environ.get("DBM_HELPER_IMAGE", "alpine:3.20")
 
+# Timezone schedules are evaluated in (IANA name, e.g. "Europe/Berlin"). Defaults
+# to UTC because that's the only thing guaranteed to be correct out of the box -
+# the container has no way to know the operator's local timezone on its own, and
+# getting this wrong silently shifts every scheduled backup by the UTC offset.
+TZ_NAME = os.environ.get("DBM_TZ", "UTC")
+
 # OAuth-based storage targets (Google Drive / OneDrive). PUBLIC_URL is the
 # address the browser uses to reach this app (e.g. "http://192.168.1.10:8420")
 # - needed to build the OAuth redirect URI, since the container can't know

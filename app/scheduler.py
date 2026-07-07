@@ -9,14 +9,14 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from app import backup_engine, job_tracker, storage_sync
-from app.config import BACKUPS_DIR
+from app.config import BACKUPS_DIR, TZ_NAME
 from app.database import SessionLocal
 from app.models import BackupRecord, Schedule
 from app.retention import VersionInfo, versions_to_prune
 
 logger = logging.getLogger("dbm.scheduler")
 
-scheduler = BackgroundScheduler()
+scheduler = BackgroundScheduler(timezone=TZ_NAME)
 
 
 def _job_id(schedule_id: int) -> str:
@@ -130,7 +130,7 @@ def _apply_retention(db, sched: Schedule):
 def add_or_update_job(sched: Schedule):
     scheduler.add_job(
         run_schedule,
-        trigger=CronTrigger.from_crontab(sched.cron_expression),
+        trigger=CronTrigger.from_crontab(sched.cron_expression, timezone=TZ_NAME),
         args=[sched.id],
         id=_job_id(sched.id),
         replace_existing=True,

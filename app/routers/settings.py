@@ -1,3 +1,4 @@
+import datetime
 import json
 from typing import Optional
 
@@ -8,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app import encryption, oauth_storage, storage_sync
 from app.auth import get_current_user
-from app.config import BACKUPS_DIR, DEFAULT_RETENTION_COUNT, DEFAULT_RETENTION_DAYS
+from app.config import BACKUPS_DIR, DEFAULT_RETENTION_COUNT, DEFAULT_RETENTION_DAYS, TZ_NAME
 from app.database import get_db
 from app.docker_client import is_available
 from app.models import StorageTarget, User
@@ -18,10 +19,13 @@ router = APIRouter(prefix="/api/settings", tags=["settings"])
 
 @router.get("/overview")
 def overview(user: User = Depends(get_current_user)):
+    import pytz
+
     docker_ok, docker_error = is_available()
     total_size = 0
     if BACKUPS_DIR.exists():
         total_size = sum(f.stat().st_size for f in BACKUPS_DIR.rglob("*") if f.is_file())
+    server_now = datetime.datetime.now(pytz.timezone(TZ_NAME))
     return {
         "backups_dir": str(BACKUPS_DIR),
         "backups_total_bytes": total_size,
@@ -30,6 +34,8 @@ def overview(user: User = Depends(get_current_user)):
         "default_retention_count": DEFAULT_RETENTION_COUNT,
         "default_retention_days": DEFAULT_RETENTION_DAYS,
         "encryption_enabled": encryption.is_enabled(),
+        "server_time": server_now.isoformat(),
+        "timezone": TZ_NAME,
     }
 
 

@@ -58,6 +58,7 @@ function toast(message, type = "ok") {
 // ---------- global job tray (always visible, on every page) ----------
 let jobTrayEl;
 let dashboardJobsTimer = null;
+let settingsClockTimer = null;
 const toastedJobIds = new Set();
 const finishedJobHideAt = new Map(); // jobId -> timestamp when it should be removed from the tray
 
@@ -260,6 +261,10 @@ async function navigate(key) {
   if (dashboardJobsTimer) {
     clearInterval(dashboardJobsTimer);
     dashboardJobsTimer = null;
+  }
+  if (settingsClockTimer) {
+    clearInterval(settingsClockTimer);
+    settingsClockTimer = null;
   }
   try {
     let content;
@@ -825,6 +830,16 @@ async function settingsPage() {
   const wrap = h(`<div>
     <div class="page-header"><h2>Einstellungen</h2></div>
 
+    <div class="section-title">Serverzeit</div>
+    <div class="card">
+      <span class="mono" id="server-clock" style="font-size:1.1rem"></span>
+      <span class="muted">(Zeitzone: <span class="mono">${overview.timezone}</span> — maßgeblich für Zeitpläne)</span>
+      ${overview.timezone === "UTC" ? `<div class="muted" style="font-size:.8rem; margin-top:6px;">
+        Läuft ein Zeitplan nicht zur erwarteten Uhrzeit: die Standard-Zeitzone ist UTC. Setze die
+        Umgebungsvariable <span class="mono">DBM_TZ</span> auf deine Zeitzone (z. B. <span class="mono">Europe/Berlin</span>)
+        und starte den Container neu.</div>` : ""}
+    </div>
+
     <div class="section-title">Speicherort</div>
     <div class="card mono">${overview.backups_dir}</div>
 
@@ -856,6 +871,17 @@ async function settingsPage() {
       </table>
     </div>
   </div>`);
+
+  // Live-ticking server clock: compute the offset between server and browser time once,
+  // then keep displaying server-time-equivalent using the browser's own clock (no repeated polling).
+  const serverTimeOffsetMs = new Date(overview.server_time).getTime() - Date.now();
+  const clockEl = wrap.querySelector("#server-clock");
+  function tickClock() {
+    const now = new Date(Date.now() + serverTimeOffsetMs);
+    clockEl.textContent = now.toLocaleString("de-DE", { dateStyle: "medium", timeStyle: "medium" });
+  }
+  tickClock();
+  settingsClockTimer = setInterval(tickClock, 1000);
 
   wrap.querySelector("#change-pass-btn").addEventListener("click", async () => {
     const current_password = wrap.querySelector("#cur-pass").value;
