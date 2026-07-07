@@ -624,10 +624,12 @@ async function schedulesPage() {
       <td>${s.last_status ? `<span class="badge ${s.last_status === "ok" ? "ok" : "failed"}">${s.last_status}</span>` : '<span class="badge neutral">nie ausgeführt</span>'}
           ${s.enabled ? "" : '<span class="badge neutral">deaktiviert</span>'}</td>
       <td style="display:flex; gap:8px;">
+        <button class="btn edit-btn">Bearbeiten</button>
         <button class="btn run-btn">Jetzt ausführen</button>
         <button class="btn danger del-btn">Löschen</button>
       </td>
     </tr>`);
+    row.querySelector(".edit-btn").addEventListener("click", () => openScheduleModal(s));
     row.querySelector(".run-btn").addEventListener("click", async () => {
       try { await api(`/api/schedules/${s.id}/run-now`, { method: "POST" }); toast("Zeitplan gestartet"); }
       catch (e) { toast(e.message, "error"); }
@@ -639,11 +641,27 @@ async function schedulesPage() {
     });
     tbody.appendChild(row);
   });
-  wrap.querySelector("#new-schedule-btn").addEventListener("click", () => openScheduleModal());
+  wrap.querySelector("#new-schedule-btn").addEventListener("click", () => openScheduleModal(null));
   return wrap;
 }
 
-async function openScheduleModal() {
+function parseCronToFrequencyFields(cron) {
+  const parts = (cron || "").trim().split(/\s+/);
+  const fallback = { freq: "daily", hour: 3, minute: 0, weekdays: ["1"], monthday: "1", hourInterval: 6 };
+  if (parts.length !== 5) return fallback;
+  const [minuteStr, hourStr, dayOfMonth, , dayOfWeek] = parts;
+  const hourlyMatch = /^\*\/(\d+)$/.exec(hourStr);
+  if (hourlyMatch && dayOfMonth === "*" && dayOfWeek === "*") {
+    return { ...fallback, freq: "hourly", hourInterval: parseInt(hourlyMatch[1], 10) };
+  }
+  const hour = parseInt(hourStr, 10) || 0;
+  const minute = parseInt(minuteStr, 10) || 0;
+  if (dayOfMonth !== "*") return { ...fallback, freq: "monthly", hour, minute, monthday: dayOfMonth };
+  if (dayOfWeek !== "*") return { ...fallback, freq: "weekly", hour, minute, weekdays: dayOfWeek.split(",") };
+  return { ...fallback, freq: "daily", hour, minute };
+}
+
+async function openScheduleModal(existing) {
   let containers = [];
   let projects = {};
   let storageTargets = [];
@@ -663,11 +681,14 @@ async function openScheduleModal() {
         </label>`).join("")
     : `<p class="muted" style="font-size:.85rem">Noch keine Speicherziele konfiguriert. Unter <strong>Einstellungen</strong> anlegen (SMB, S3, Google Drive/OneDrive via rclone, ...).</p>`;
 
+  const cronFields = parseCronToFrequencyFields(existing ? existing.cron_expression : null);
+  const timeValue = `${String(cronFields.hour).padStart(2, "0")}:${String(cronFields.minute).padStart(2, "0")}`;
+
   const overlay = h(`
     <div class="modal-overlay">
       <div class="modal">
-        <h3>Neuer Zeitplan</h3>
-        <div class="field"><label>Name</label><input type="text" id="s-name" /></div>
+        <h3>${existing ? "Zeitplan bearbeiten" : "Neuer Zeitplan"}</h3>
+        <div class="field"><label>Name</label><input type="text" id="s-name" value="${existing ? existing.name : ""}" /></div>
         <div class="field"><label>Sicherungsquelle (was wird gesichert)</label>
           <select id="s-target-type">
             <option value="landscape">Gesamte Docker-Landschaft</option>
@@ -688,48 +709,59 @@ async function openScheduleModal() {
         <div class="field"><label>Wie oft?</label>
           <select id="s-freq">
             <option value="hourly">Alle X Stunden</option>
-            <option value="daily" selected>Täglich</option>
+            <option value="daily">Täglich</option>
             <option value="weekly">Wöchentlich</option>
             <option value="monthly">Monatlich</option>
           </select>
         </div>
         <div class="field" id="s-hourly-field" style="display:none">
           <label>Alle wie viele Stunden?</label>
-          <input type="number" id="s-hour-interval" value="6" min="1" max="23" />
+          <input type="number" id="s-hour-interval" value="${cronFields.hourInterval}" min="1" max="23" />
         </div>
-        <div class="field" id="s-time-field"><label>Uhrzeit</label><input type="time" id="s-time" value="03:00" /></div>
+        <div class="field" id="s-time-field"><label>Uhrzeit</label><input type="time" id="s-time" value="${timeValue}" /></div>
         <div class="field" id="s-weekdays-field" style="display:none">
           <label>An welchen Tagen?</label>
           <div style="display:flex; gap:10px; flex-wrap:wrap;">
-            ${[["Mo", 1], ["Di", 2], ["Mi", 3], ["Do", 4], ["Fr", 5], ["Sa", 6], ["So", 0]].map(([label, cronDow], i) => `
+            ${[["Mo", 1], ["Di", 2], ["Mi", 3], ["Do", 4], ["Fr", 5], ["Sa", 6], ["So", 0]].map(([label, cronDow]) => `
               <label style="display:flex; align-items:center; gap:4px;">
-                <input type="checkbox" class="s-weekday" value="${cronDow}" style="width:auto;" ${i === 0 ? "checked" : ""} /> ${label}
+                <input type="checkbox" class="s-weekday" value="${cronDow}" style="width:auto;" ${cronFields.weekdays.includes(String(cronDow)) ? "checked" : ""} /> ${label}
               </label>`).join("")}
           </div>
         </div>
         <div class="field" id="s-monthday-field" style="display:none">
           <label>An welchem Tag im Monat?</label>
           <select id="s-monthday">
-            ${Array.from({ length: 28 }, (_, i) => i + 1).map((d) => `<option value="${d}" ${d === 1 ? "selected" : ""}>${d}.</option>`).join("")}
+            ${Array.from({ length: 28 }, (_, i) => i + 1).map((d) => `<option value="${d}" ${String(d) === cronFields.monthday ? "selected" : ""}>${d}.</option>`).join("")}
           </select>
         </div>
-        <div class="field"><label>Aufbewahrung: Anzahl Versionen (0 = unbegrenzt)</label><input type="text" id="s-ret-count" value="7" /></div>
-        <div class="field"><label>Aufbewahrung: Tage (0 = deaktiviert)</label><input type="text" id="s-ret-days" value="0" /></div>
+        <div class="field"><label>Aufbewahrung: Anzahl Versionen (0 = unbegrenzt)</label><input type="text" id="s-ret-count" value="${existing ? existing.retention_count : 7}" /></div>
+        <div class="field"><label>Aufbewahrung: Tage (0 = deaktiviert)</label><input type="text" id="s-ret-days" value="${existing ? existing.retention_days : 0}" /></div>
         <div class="field">
           <label>Speicherziele für diesen Zeitplan (wohin zusätzlich hochgeladen wird)</label>
           <div id="s-storage-targets">${targetsHtml}</div>
         </div>
         <div class="row-actions">
           <button class="btn" id="cancel-btn">Abbrechen</button>
-          <button class="btn primary" id="save-btn">Erstellen</button>
+          <button class="btn primary" id="save-btn">${existing ? "Speichern" : "Erstellen"}</button>
         </div>
       </div>
     </div>
   `);
+  overlay.querySelector("#s-freq").value = cronFields.freq;
+  if (existing) {
+    overlay.querySelector("#s-target-type").value = existing.target_type;
+    if (existing.target_type === "container") overlay.querySelector("#s-target-ref").value = existing.target_ref || "";
+    overlay.querySelector("#s-project-filter").value = existing.project_filter || "";
+    (existing.storage_target_ids || []).forEach((id) => {
+      const cb = overlay.querySelector(`.s-storage-target[value="${id}"]`);
+      if (cb) cb.checked = true;
+    });
+  }
   overlay.querySelector("#s-target-type").addEventListener("change", (e) => {
     overlay.querySelector("#s-container-field").style.display = e.target.value === "container" ? "block" : "none";
     overlay.querySelector("#s-project-field").style.display = e.target.value === "landscape" ? "block" : "none";
   });
+  overlay.querySelector("#s-target-type").dispatchEvent(new Event("change"));
   function updateFrequencyFields() {
     const freq = overlay.querySelector("#s-freq").value;
     overlay.querySelector("#s-hourly-field").style.display = freq === "hourly" ? "block" : "none";
@@ -770,10 +802,14 @@ async function openScheduleModal() {
       retention_count: parseInt(overlay.querySelector("#s-ret-count").value || "0", 10),
       retention_days: parseInt(overlay.querySelector("#s-ret-days").value || "0", 10),
       storage_target_ids: storageTargetIds,
-      enabled: true,
+      enabled: existing ? existing.enabled : true,
     };
     try {
-      await api("/api/schedules", { method: "POST", body: JSON.stringify(payload) });
+      if (existing) {
+        await api(`/api/schedules/${existing.id}`, { method: "PUT", body: JSON.stringify(payload) });
+      } else {
+        await api("/api/schedules", { method: "POST", body: JSON.stringify(payload) });
+      }
       overlay.remove();
       navigate("schedules");
     } catch (e) { toast(e.message, "error"); }
