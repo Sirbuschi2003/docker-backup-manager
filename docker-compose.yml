@@ -6,7 +6,8 @@ services:
     restart: unless-stopped
     ports:
       - "8420:8420"
-    environment:
+    # Uncomment and set any of these if needed (all optional - see README "Sicherheit"):
+    # environment:
       # Optional: signs session cookies. If unset, a random key is generated
       # on first start and persisted as /data/.secret_key - only set this
       # explicitly if you need a stable, self-chosen key (e.g. multiple
