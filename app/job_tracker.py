@@ -101,7 +101,7 @@ def update_bytes(job_id: str, delta: int):
             return
         job.bytes_done += delta
         now = time.time()
-        samples = _byte_samples.setdefault(job_id, deque())
+        samples = _byte_samples.setdefault(job_id, deque(maxlen=2000))
         samples.append((now, job.bytes_done))
         cutoff = now - 10
         while len(samples) > 2 and samples[0][0] < cutoff:

@@ -63,8 +63,13 @@ def test_iter_volume_tar_chunks_yields_container_stdout(monkeypatch):
 
 
 def test_iter_volume_tar_chunks_stops_and_cleans_up_on_cancel(monkeypatch):
+    # should_cancel/on_bytes are only checked once ~1MB has accumulated (see
+    # iter_volume_tar_chunks) to avoid per-tiny-chunk lock overhead on a real
+    # Docker attach stream - chunks here need to cross that threshold on
+    # their own to exercise the mid-stream cancel path.
+    big_chunk = b"x" * (1024 * 1024)
     client = _fake_client()
-    container = _fake_helper_container(client, [b"chunk1", b"chunk2", b"chunk3"])
+    container = _fake_helper_container(client, [big_chunk, big_chunk, big_chunk])
     client.containers.create.return_value = container
     monkeypatch.setattr(backup_engine, "get_client", lambda: client)
 
@@ -76,8 +81,38 @@ def test_iter_volume_tar_chunks_stops_and_cleans_up_on_cancel(monkeypatch):
         for chunk in backup_engine.iter_volume_tar_chunks("some-volume", should_cancel=should_cancel):
             seen.append(chunk)
 
-    assert seen == [b"chunk1"]
+    assert seen == [big_chunk]
     container.remove.assert_called_once_with(force=True)
+
+
+def test_iter_volume_tar_chunks_checks_cancel_at_end_even_for_small_transfer(monkeypatch):
+    # A transfer that never crosses the ~1MB batching threshold must still be
+    # cancellable via the final should_cancel() check after the stream ends.
+    client = _fake_client()
+    container = _fake_helper_container(client, [b"chunk1", b"chunk2", b"chunk3"])
+    client.containers.create.return_value = container
+    monkeypatch.setattr(backup_engine, "get_client", lambda: client)
+
+    with pytest.raises(backup_engine.BackupCancelled):
+        list(backup_engine.iter_volume_tar_chunks("some-volume", should_cancel=lambda: True))
+
+    container.remove.assert_called_once_with(force=True)
+
+
+def test_iter_volume_tar_chunks_reports_bytes_in_batches(monkeypatch):
+    big_chunk = b"x" * (1024 * 1024)
+    small_chunk = b"y" * 10
+    client = _fake_client()
+    container = _fake_helper_container(client, [big_chunk, small_chunk])
+    client.containers.create.return_value = container
+    monkeypatch.setattr(backup_engine, "get_client", lambda: client)
+
+    reported = []
+    list(backup_engine.iter_volume_tar_chunks("some-volume", on_bytes=reported.append))
+
+    # The big chunk crosses the threshold on its own; the trailing small
+    # chunk is flushed once the stream ends.
+    assert reported == [len(big_chunk), len(small_chunk)]
 
 
 def test_iter_volume_tar_chunks_raises_on_nonzero_exit(monkeypatch):

@@ -161,9 +161,14 @@ def iter_volume_tar_chunks(volume_name: str, should_cancel: ShouldCancel = _neve
     forever, immune to should_cancel() since it never yields control back to
     the loop below.
 
-    should_cancel() is polled between chunks so even a single huge volume
-    (e.g. hundreds of GB) can be interrupted promptly rather than only
-    between whole volumes/containers.
+    should_cancel() and on_bytes() are polled/reported once per _CHECK_INTERVAL
+    bytes rather than on every raw chunk off the socket - individual frames off
+    a Docker attach stream can be as small as a few KB (matching whatever the
+    tar process's own stdout writes happened to be), and should_cancel in
+    particular is a job-tracker lookup that takes a lock. At tens of thousands
+    of tiny frames per second that per-chunk overhead is itself a meaningful
+    tax on throughput; batching it still leaves cancellation responsive to
+    well under a second for any real transfer rate.
     """
     client = get_client()
     container = client.containers.create(
@@ -173,16 +178,25 @@ def iter_volume_tar_chunks(volume_name: str, should_cancel: ShouldCancel = _neve
         tty=False,
         log_config={"Type": "none"},
     )
+    _CHECK_INTERVAL = 1024 * 1024
+    pending = 0
     try:
         stream = client.api.attach(container.id, stdout=True, stderr=False, stream=True, logs=False)
         container.start()
         for chunk in stream:
-            if should_cancel():
-                raise BackupCancelled(f"Archiving of '{volume_name}' was cancelled")
             if chunk:
-                if on_bytes:
-                    on_bytes(len(chunk))
+                pending += len(chunk)
+                if pending >= _CHECK_INTERVAL:
+                    if should_cancel():
+                        raise BackupCancelled(f"Archiving of '{volume_name}' was cancelled")
+                    if on_bytes:
+                        on_bytes(pending)
+                    pending = 0
                 yield chunk
+        if should_cancel():
+            raise BackupCancelled(f"Archiving of '{volume_name}' was cancelled")
+        if pending and on_bytes:
+            on_bytes(pending)
         result = container.wait()
         status = result.get("StatusCode", 0) if isinstance(result, dict) else result
         if status != 0:
