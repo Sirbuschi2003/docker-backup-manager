@@ -38,6 +38,13 @@ from app.config import BACKUPS_DIR
 
 logger = logging.getLogger("dbm.storage_sync")
 
+# smbclient.open_file() falls back to Python io's default buffer (8KB) unless
+# told otherwise - each write()/read() then becomes its own synchronous SMB2
+# request/response round trip, so throughput on even a fast LAN collapses to
+# a fraction of the link's real bandwidth (observed: ~14MB/s on gigabit).
+# A much larger buffer means far fewer, far larger requests.
+_SMB_IO_BUFFER_SIZE = 1024 * 1024
+
 RCLONE_CONFIG_PATH = "/data/rclone.conf"
 
 
@@ -162,8 +169,8 @@ def sync_smb(backup_path: Path, config: dict) -> None:
         remote_path = remote_root + "\\" + rel.as_posix().replace("/", "\\")
         remote_dir = remote_path.rsplit("\\", 1)[0]
         smbclient.makedirs(remote_dir, exist_ok=True)
-        with open(file_path, "rb") as src, smbclient.open_file(remote_path, mode="wb") as dst:
-            shutil.copyfileobj(src, dst)
+        with open(file_path, "rb") as src, smbclient.open_file(remote_path, mode="wb", buffering=_SMB_IO_BUFFER_SIZE) as dst:
+            shutil.copyfileobj(src, dst, length=_SMB_IO_BUFFER_SIZE)
 
 
 def sync_rclone(backup_path: Path, config: dict) -> None:
@@ -336,7 +343,7 @@ def _stream_upload_smb(config: dict, relative_path: str, chunks) -> None:
     remote_path = remote_root + "\\" + relative_path.replace("/", "\\")
     remote_dir = remote_path.rsplit("\\", 1)[0]
     smbclient.makedirs(remote_dir, exist_ok=True)
-    with smbclient.open_file(remote_path, mode="wb") as dst:
+    with smbclient.open_file(remote_path, mode="wb", buffering=_SMB_IO_BUFFER_SIZE) as dst:
         for chunk in chunks:
             dst.write(chunk)
 
@@ -483,8 +490,8 @@ def _download_smb(config: dict, relative_path: str, dest_path: Path) -> None:
     _smb_register_session(config)
     remote_root = _smb_remote_root(config, "")
     remote_path = remote_root + "\\" + relative_path.replace("/", "\\")
-    with smbclient.open_file(remote_path, mode="rb") as src, open(dest_path, "wb") as dst:
-        shutil.copyfileobj(src, dst)
+    with smbclient.open_file(remote_path, mode="rb", buffering=_SMB_IO_BUFFER_SIZE) as src, open(dest_path, "wb") as dst:
+        shutil.copyfileobj(src, dst, length=_SMB_IO_BUFFER_SIZE)
 
 
 def _download_rclone(config: dict, relative_path: str, dest_path: Path) -> None:
@@ -838,8 +845,8 @@ def _download_full_smb(config: dict, relative_key: str, dest_dir: Path) -> None:
             remote_file = f"{dirpath}\\{filename}"
             dest_file = (dest_dir / rel_dir / filename) if rel_dir else (dest_dir / filename)
             dest_file.parent.mkdir(parents=True, exist_ok=True)
-            with smbclient.open_file(remote_file, mode="rb") as src, open(dest_file, "wb") as dst:
-                shutil.copyfileobj(src, dst)
+            with smbclient.open_file(remote_file, mode="rb", buffering=_SMB_IO_BUFFER_SIZE) as src, open(dest_file, "wb") as dst:
+                shutil.copyfileobj(src, dst, length=_SMB_IO_BUFFER_SIZE)
 
 
 def _download_full_rclone(config: dict, relative_key: str, dest_dir: Path) -> None:
