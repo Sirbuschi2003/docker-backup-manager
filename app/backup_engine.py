@@ -139,6 +139,14 @@ def iter_volume_tar_chunks(volume_name: str, should_cancel: ShouldCancel = _neve
     bonus lets the data be streamed directly to a storage target without ever
     touching local disk (see stream_volume_to_target).
 
+    The stream is read via a raw attach socket with the container's logging
+    driver disabled (log_config Type "none"), not via container.logs(). Logs
+    go through the json-file driver by default, which JSON-escapes every
+    byte onto host disk and is then re-read over the HTTP /logs endpoint -
+    for a multi-GB binary tar stream that both balloons disk usage (escaped
+    binary data runs ~3-5x larger than the source) and collapses throughput
+    to roughly 1MB/s.
+
     should_cancel() is polled between chunks so even a single huge volume
     (e.g. hundreds of GB) can be interrupted promptly rather than only
     between whole volumes/containers.
@@ -149,12 +157,16 @@ def iter_volume_tar_chunks(volume_name: str, should_cancel: ShouldCancel = _neve
         command=["tar", "czf", "-", "-C", "/data", "."],
         volumes={volume_name: {"bind": "/data", "mode": "ro"}},
         detach=True,
+        tty=False,
+        log_config={"Type": "none"},
     )
     try:
-        for chunk in container.logs(stream=True, stdout=True, stderr=False):
+        stream = client.api.attach(container.id, stdout=True, stderr=False, stream=True, logs=False)
+        for chunk in stream:
             if should_cancel():
                 raise BackupCancelled(f"Archiving of '{volume_name}' was cancelled")
-            yield chunk
+            if chunk:
+                yield chunk
         result = container.wait()
         status = result.get("StatusCode", 0) if isinstance(result, dict) else result
         if status != 0:

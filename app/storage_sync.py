@@ -370,6 +370,52 @@ STREAM_UPLOAD_HANDLERS = {
 }
 
 
+def _delete_partial_local_path(config: dict, relative_path: str) -> None:
+    dest = Path(config["path"]) / relative_path
+    dest.unlink(missing_ok=True)
+
+
+def _delete_partial_smb(config: dict, relative_path: str) -> None:
+    import smbclient
+
+    _smb_register_session(config)
+    remote_root = _smb_remote_root(config, "")
+    remote_path = remote_root + "\\" + relative_path.replace("/", "\\")
+    if smbclient.path.exists(remote_path):
+        smbclient.remove(remote_path)
+
+
+def _delete_partial_s3(config: dict, relative_path: str) -> None:
+    import boto3
+
+    session = boto3.session.Session(
+        aws_access_key_id=config["access_key"],
+        aws_secret_access_key=config["secret_key"],
+        region_name=config.get("region") or None,
+    )
+    s3 = session.client("s3", endpoint_url=config.get("endpoint_url") or None)
+    key = "/".join(filter(None, [config.get("prefix", "").strip("/"), relative_path]))
+    s3.delete_object(Bucket=config["bucket"], Key=key)
+
+
+def _delete_partial_rclone(config: dict, relative_path: str) -> None:
+    remote = config["remote"]
+    remote_path = config.get("remote_path", "").strip("/")
+    dest = f"{remote}:{remote_path}/{relative_path}".replace("\\", "/")
+    subprocess.run(
+        ["rclone", "deletefile", dest, "--config", RCLONE_CONFIG_PATH],
+        capture_output=True, text=True, timeout=300,
+    )
+
+
+STREAM_UPLOAD_CLEANUP_HANDLERS = {
+    "local_path": _delete_partial_local_path,
+    "smb": _delete_partial_smb,
+    "s3": _delete_partial_s3,
+    "rclone": _delete_partial_rclone,
+}
+
+
 def stream_upload_to_target(target_type: str, config_json: str, relative_path: str, chunks) -> None:
     """Uploads a stream of bytes chunks straight to a storage target, without
     ever writing it to local disk first. Not supported for google_drive /
@@ -382,7 +428,21 @@ def stream_upload_to_target(target_type: str, config_json: str, relative_path: s
             "(nur lokaler Pfad, SMB, S3 und rclone)."
         )
     config = json.loads(config_json or "{}")
-    handler(config, relative_path, chunks)
+    try:
+        handler(config, relative_path, chunks)
+    except BaseException:
+        # A cancelled/failed volume archive (e.g. BackupCancelled, a network
+        # blip) still leaves however many bytes were already written sitting
+        # on the target - for a multi-GB volume that's a large orphaned file
+        # that never gets counted or cleaned up by retention. Best-effort
+        # remove it so failed attempts don't silently eat disk space forever.
+        cleanup = STREAM_UPLOAD_CLEANUP_HANDLERS.get(target_type)
+        if cleanup:
+            try:
+                cleanup(config, relative_path)
+            except Exception:  # noqa: BLE001
+                logger.exception("Failed to clean up partial streamed upload for %s", relative_path)
+        raise
 
 
 def resolve_stream_target(db, target_id: Optional[int]):

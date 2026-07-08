@@ -24,18 +24,31 @@ def test_dir_size_bytes(tmp_path: Path):
     assert dir_size_bytes(tmp_path) == 11
 
 
-def _fake_helper_container(chunks, status_code=0):
-    """Builds a MagicMock container as returned by client.containers.run(detach=True):
-    .logs(stream=True) yields the given chunks, .wait() reports status_code."""
+def _fake_client():
+    """A MagicMock docker client wired so client.api.attach(container.id, ...) streams
+    back whatever chunks were registered for that container via _fake_helper_container -
+    mocking a raw attach-socket read (see iter_volume_tar_chunks, which reads this way
+    instead of container.logs() to avoid routing bulk tar data through the json-file
+    logging driver)."""
+    client = MagicMock()
+    client._chunk_registry = {}
+    client.api.attach.side_effect = lambda container_id, **kwargs: iter(client._chunk_registry[container_id])
+    return client
+
+
+def _fake_helper_container(client, chunks, status_code=0):
+    """Builds a MagicMock container as returned by client.containers.run(detach=True)
+    and registers its stdout chunks with the client's fake attach socket."""
     container = MagicMock()
-    container.logs.return_value = iter(chunks)
+    container.id = f"helper-{len(client._chunk_registry)}"
+    client._chunk_registry[container.id] = chunks
     container.wait.return_value = {"StatusCode": status_code}
     return container
 
 
 def test_iter_volume_tar_chunks_yields_container_stdout(monkeypatch):
-    container = _fake_helper_container([b"chunk1", b"chunk2"])
-    client = MagicMock()
+    client = _fake_client()
+    container = _fake_helper_container(client, [b"chunk1", b"chunk2"])
     client.containers.run.return_value = container
     monkeypatch.setattr(backup_engine, "get_client", lambda: client)
 
@@ -50,8 +63,8 @@ def test_iter_volume_tar_chunks_yields_container_stdout(monkeypatch):
 
 
 def test_iter_volume_tar_chunks_stops_and_cleans_up_on_cancel(monkeypatch):
-    container = _fake_helper_container([b"chunk1", b"chunk2", b"chunk3"])
-    client = MagicMock()
+    client = _fake_client()
+    container = _fake_helper_container(client, [b"chunk1", b"chunk2", b"chunk3"])
     client.containers.run.return_value = container
     monkeypatch.setattr(backup_engine, "get_client", lambda: client)
 
@@ -68,8 +81,8 @@ def test_iter_volume_tar_chunks_stops_and_cleans_up_on_cancel(monkeypatch):
 
 
 def test_iter_volume_tar_chunks_raises_on_nonzero_exit(monkeypatch):
-    container = _fake_helper_container([b"partial"], status_code=1)
-    client = MagicMock()
+    client = _fake_client()
+    container = _fake_helper_container(client, [b"partial"], status_code=1)
     client.containers.run.return_value = container
     monkeypatch.setattr(backup_engine, "get_client", lambda: client)
 
@@ -79,8 +92,8 @@ def test_iter_volume_tar_chunks_raises_on_nonzero_exit(monkeypatch):
 
 
 def test_backup_volume_to_file_writes_streamed_chunks(tmp_path: Path, monkeypatch):
-    container = _fake_helper_container([b"fake-", b"tar-data"])
-    client = MagicMock()
+    client = _fake_client()
+    container = _fake_helper_container(client, [b"fake-", b"tar-data"])
     client.containers.run.return_value = container
     monkeypatch.setattr(backup_engine, "get_client", lambda: client)
 
@@ -91,8 +104,8 @@ def test_backup_volume_to_file_writes_streamed_chunks(tmp_path: Path, monkeypatc
 
 
 def test_stream_volume_to_target_uploads_without_local_file(tmp_path: Path, monkeypatch):
-    container = _fake_helper_container([b"fake-", b"tar-data"])
-    client = MagicMock()
+    client = _fake_client()
+    container = _fake_helper_container(client, [b"fake-", b"tar-data"])
     client.containers.run.return_value = container
     monkeypatch.setattr(backup_engine, "get_client", lambda: client)
 
@@ -131,10 +144,10 @@ def test_backup_container_stops_and_restarts_running_container_when_opted_in(tmp
     }
     container.image.save.return_value = iter([b"image-bytes"])
 
-    client = MagicMock()
+    client = _fake_client()
     client.containers.get.return_value = container
     client.version.return_value = {"ApiVersion": "1.45"}
-    client.containers.run.side_effect = lambda image, command=None, volumes=None, detach=None: _fake_helper_container([b"data"])
+    client.containers.run.side_effect = lambda *a, **k: _fake_helper_container(client, [b"data"])
     monkeypatch.setattr(backup_engine, "get_client", lambda: client)
 
     result = backup_engine.backup_container("postgres", dest_root=tmp_path, stop_container=True)
@@ -219,15 +232,15 @@ def test_backup_container_archives_bind_mounts_and_skips_denylisted_ones(tmp_pat
     }
     container.image.save.return_value = iter([b"image-bytes"])
 
-    client = MagicMock()
+    client = _fake_client()
     client.containers.get.return_value = container
     client.version.return_value = {"ApiVersion": "1.45"}
 
-    def fake_helper_run(image, command=None, volumes=None, detach=None):
+    def fake_helper_run(image, command=None, volumes=None, detach=None, **kwargs):
         # volumes has exactly one key: the volume name or bind source being archived.
         key = next(iter(volumes))
         content = f"data-for-{key}".encode()
-        return _fake_helper_container([content])
+        return _fake_helper_container(client, [content])
 
     client.containers.run.side_effect = fake_helper_run
     monkeypatch.setattr(backup_engine, "get_client", lambda: client)
@@ -298,10 +311,10 @@ def test_backup_container_stops_at_next_checkpoint_when_cancelled(tmp_path: Path
     }
     container.image.save.return_value = iter([b"image-bytes"])
 
-    client = MagicMock()
+    client = _fake_client()
     client.containers.get.return_value = container
     client.version.return_value = {"ApiVersion": "1.45"}
-    client.containers.run.side_effect = lambda image, command=None, volumes=None, detach=None: _fake_helper_container([b"data"])
+    client.containers.run.side_effect = lambda *a, **k: _fake_helper_container(client, [b"data"])
     monkeypatch.setattr(backup_engine, "get_client", lambda: client)
 
     # Cancel once we reach the second volume - vol-a should already be archived.
