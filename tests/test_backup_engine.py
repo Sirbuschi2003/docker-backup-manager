@@ -37,7 +37,7 @@ def _fake_client():
 
 
 def _fake_helper_container(client, chunks, status_code=0):
-    """Builds a MagicMock container as returned by client.containers.run(detach=True)
+    """Builds a MagicMock container as returned by client.containers.create(detach=True)
     and registers its stdout chunks with the client's fake attach socket."""
     container = MagicMock()
     container.id = f"helper-{len(client._chunk_registry)}"
@@ -49,7 +49,7 @@ def _fake_helper_container(client, chunks, status_code=0):
 def test_iter_volume_tar_chunks_yields_container_stdout(monkeypatch):
     client = _fake_client()
     container = _fake_helper_container(client, [b"chunk1", b"chunk2"])
-    client.containers.run.return_value = container
+    client.containers.create.return_value = container
     monkeypatch.setattr(backup_engine, "get_client", lambda: client)
 
     chunks = list(backup_engine.iter_volume_tar_chunks("some-volume"))
@@ -57,7 +57,7 @@ def test_iter_volume_tar_chunks_yields_container_stdout(monkeypatch):
     assert chunks == [b"chunk1", b"chunk2"]
     # No bind mount at all - just the read-only volume, avoiding the host-path
     # resolution problem entirely (see module docstring on iter_volume_tar_chunks).
-    run_kwargs = client.containers.run.call_args.kwargs
+    run_kwargs = client.containers.create.call_args.kwargs
     assert run_kwargs["volumes"] == {"some-volume": {"bind": "/data", "mode": "ro"}}
     container.remove.assert_called_once_with(force=True)
 
@@ -65,7 +65,7 @@ def test_iter_volume_tar_chunks_yields_container_stdout(monkeypatch):
 def test_iter_volume_tar_chunks_stops_and_cleans_up_on_cancel(monkeypatch):
     client = _fake_client()
     container = _fake_helper_container(client, [b"chunk1", b"chunk2", b"chunk3"])
-    client.containers.run.return_value = container
+    client.containers.create.return_value = container
     monkeypatch.setattr(backup_engine, "get_client", lambda: client)
 
     seen = []
@@ -83,7 +83,7 @@ def test_iter_volume_tar_chunks_stops_and_cleans_up_on_cancel(monkeypatch):
 def test_iter_volume_tar_chunks_raises_on_nonzero_exit(monkeypatch):
     client = _fake_client()
     container = _fake_helper_container(client, [b"partial"], status_code=1)
-    client.containers.run.return_value = container
+    client.containers.create.return_value = container
     monkeypatch.setattr(backup_engine, "get_client", lambda: client)
 
     with pytest.raises(RuntimeError):
@@ -94,7 +94,7 @@ def test_iter_volume_tar_chunks_raises_on_nonzero_exit(monkeypatch):
 def test_backup_volume_to_file_writes_streamed_chunks(tmp_path: Path, monkeypatch):
     client = _fake_client()
     container = _fake_helper_container(client, [b"fake-", b"tar-data"])
-    client.containers.run.return_value = container
+    client.containers.create.return_value = container
     monkeypatch.setattr(backup_engine, "get_client", lambda: client)
 
     dest = tmp_path / "vol.tar.gz"
@@ -106,7 +106,7 @@ def test_backup_volume_to_file_writes_streamed_chunks(tmp_path: Path, monkeypatc
 def test_stream_volume_to_target_uploads_without_local_file(tmp_path: Path, monkeypatch):
     client = _fake_client()
     container = _fake_helper_container(client, [b"fake-", b"tar-data"])
-    client.containers.run.return_value = container
+    client.containers.create.return_value = container
     monkeypatch.setattr(backup_engine, "get_client", lambda: client)
 
     dest = tmp_path / "remote" / "vol.tar.gz"
@@ -147,7 +147,7 @@ def test_backup_container_stops_and_restarts_running_container_when_opted_in(tmp
     client = _fake_client()
     client.containers.get.return_value = container
     client.version.return_value = {"ApiVersion": "1.45"}
-    client.containers.run.side_effect = lambda *a, **k: _fake_helper_container(client, [b"data"])
+    client.containers.create.side_effect = lambda *a, **k: _fake_helper_container(client, [b"data"])
     monkeypatch.setattr(backup_engine, "get_client", lambda: client)
 
     result = backup_engine.backup_container("postgres", dest_root=tmp_path, stop_container=True)
@@ -242,7 +242,7 @@ def test_backup_container_archives_bind_mounts_and_skips_denylisted_ones(tmp_pat
         content = f"data-for-{key}".encode()
         return _fake_helper_container(client, [content])
 
-    client.containers.run.side_effect = fake_helper_run
+    client.containers.create.side_effect = fake_helper_run
     monkeypatch.setattr(backup_engine, "get_client", lambda: client)
 
     result = backup_engine.backup_container("nextcloud", dest_root=tmp_path)
@@ -314,7 +314,7 @@ def test_backup_container_stops_at_next_checkpoint_when_cancelled(tmp_path: Path
     client = _fake_client()
     client.containers.get.return_value = container
     client.version.return_value = {"ApiVersion": "1.45"}
-    client.containers.run.side_effect = lambda *a, **k: _fake_helper_container(client, [b"data"])
+    client.containers.create.side_effect = lambda *a, **k: _fake_helper_container(client, [b"data"])
     monkeypatch.setattr(backup_engine, "get_client", lambda: client)
 
     # Cancel once we reach the second volume - vol-a should already be archived.

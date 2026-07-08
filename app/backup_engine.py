@@ -147,21 +147,31 @@ def iter_volume_tar_chunks(volume_name: str, should_cancel: ShouldCancel = _neve
     binary data runs ~3-5x larger than the source) and collapses throughput
     to roughly 1MB/s.
 
+    The container is created (not run/started) first, then attached to, and
+    only started after the attach connection is hijacked - not
+    create-and-start-then-attach. With the log driver disabled there is no
+    buffered output to fall back on, so attaching after starting races a
+    fast-finishing container (a small volume can tar up in well under a
+    second): if it has already exited by the time attach() connects, the
+    live-only stream has nothing left to deliver and the read blocks
+    forever, immune to should_cancel() since it never yields control back to
+    the loop below.
+
     should_cancel() is polled between chunks so even a single huge volume
     (e.g. hundreds of GB) can be interrupted promptly rather than only
     between whole volumes/containers.
     """
     client = get_client()
-    container = client.containers.run(
+    container = client.containers.create(
         DOCKER_HELPER_IMAGE,
         command=["tar", "czf", "-", "-C", "/data", "."],
         volumes={volume_name: {"bind": "/data", "mode": "ro"}},
-        detach=True,
         tty=False,
         log_config={"Type": "none"},
     )
     try:
         stream = client.api.attach(container.id, stdout=True, stderr=False, stream=True, logs=False)
+        container.start()
         for chunk in stream:
             if should_cancel():
                 raise BackupCancelled(f"Archiving of '{volume_name}' was cancelled")
