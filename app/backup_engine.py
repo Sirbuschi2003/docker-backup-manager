@@ -42,6 +42,9 @@ StreamTarget = tuple[str, str, int]
 
 ProgressCallback = Callable[[int, str, Optional[int]], None]
 ShouldCancel = Callable[[], bool]
+# Called with the number of new bytes read/written (not cumulative) so the
+# job tracker can derive a live transfer speed - see job_tracker.update_bytes.
+BytesCallback = Optional[Callable[[int], None]]
 
 
 def _noop_progress(step: int, name: str, total: Optional[int] = None) -> None:
@@ -125,7 +128,8 @@ def _should_backup_bind_mount(source: str) -> bool:
     return True
 
 
-def iter_volume_tar_chunks(volume_name: str, should_cancel: ShouldCancel = _never_cancel) -> Iterator[bytes]:
+def iter_volume_tar_chunks(volume_name: str, should_cancel: ShouldCancel = _never_cancel,
+                            on_bytes: BytesCallback = None) -> Iterator[bytes]:
     """Streams a tar.gz of a named Docker volume's contents straight from a
     disposable helper container's stdout - no bind mount involved at all.
 
@@ -176,6 +180,8 @@ def iter_volume_tar_chunks(volume_name: str, should_cancel: ShouldCancel = _neve
             if should_cancel():
                 raise BackupCancelled(f"Archiving of '{volume_name}' was cancelled")
             if chunk:
+                if on_bytes:
+                    on_bytes(len(chunk))
                 yield chunk
         result = container.wait()
         status = result.get("StatusCode", 0) if isinstance(result, dict) else result
@@ -188,16 +194,17 @@ def iter_volume_tar_chunks(volume_name: str, should_cancel: ShouldCancel = _neve
             pass
 
 
-def backup_volume_to_file(volume_name: str, dest_tar_gz: Path, should_cancel: ShouldCancel = _never_cancel) -> None:
+def backup_volume_to_file(volume_name: str, dest_tar_gz: Path, should_cancel: ShouldCancel = _never_cancel,
+                           on_bytes: BytesCallback = None) -> None:
     """Tar up a named Docker volume's contents into a local file."""
     dest_tar_gz.parent.mkdir(parents=True, exist_ok=True)
     with open(dest_tar_gz, "wb") as f:
-        for chunk in iter_volume_tar_chunks(volume_name, should_cancel=should_cancel):
+        for chunk in iter_volume_tar_chunks(volume_name, should_cancel=should_cancel, on_bytes=on_bytes):
             f.write(chunk)
 
 
 def stream_volume_to_target(volume_name: str, target_type: str, config_json: str, relative_path: str,
-                             should_cancel: ShouldCancel = _never_cancel) -> None:
+                             should_cancel: ShouldCancel = _never_cancel, on_bytes: BytesCallback = None) -> None:
     """Tar up a named Docker volume's contents and upload it straight to a
     storage target, without ever writing the archive to local disk. Note:
     this bypasses DBM_ENCRYPTION_KEY at-rest encryption entirely, since that
@@ -206,7 +213,8 @@ def stream_volume_to_target(volume_name: str, target_type: str, config_json: str
     encryption, etc.)."""
     from app import storage_sync
     storage_sync.stream_upload_to_target(target_type, config_json, relative_path,
-                                          iter_volume_tar_chunks(volume_name, should_cancel=should_cancel))
+                                          iter_volume_tar_chunks(volume_name, should_cancel=should_cancel,
+                                                                  on_bytes=on_bytes))
 
 
 def restore_volume_from_file(volume_name: str, src_tar_gz: Path) -> None:
@@ -227,7 +235,8 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
                       on_progress: ProgressCallback = _noop_progress,
                       stream_target: Optional[StreamTarget] = None,
                       should_cancel: ShouldCancel = _never_cancel,
-                      stop_container: bool = False) -> BackupResult:
+                      stop_container: bool = False,
+                      on_bytes: BytesCallback = None) -> BackupResult:
     client = get_client()
     container = client.containers.get(container_id_or_name)
     attrs = container.attrs
@@ -278,6 +287,8 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
         with open(image_tar, "wb") as f:
             for chunk in container.image.save(named=True):
                 _check_cancel(should_cancel, "saving image")
+                if on_bytes:
+                    on_bytes(len(chunk))
                 f.write(chunk)
 
         if should_stop:
@@ -300,10 +311,11 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
                 on_progress(step, f"Streaming volume {vol_name} to storage target", total_steps)
                 relative_path = f"{sanitize_name(name)}/{ts}/volumes/{vol_filename}"
                 stream_volume_to_target(vol_name, target_type, target_config_json, relative_path,
-                                        should_cancel=should_cancel)
+                                        should_cancel=should_cancel, on_bytes=on_bytes)
             else:
                 on_progress(step, f"Archiving volume {vol_name}", total_steps)
-                backup_volume_to_file(vol_name, volumes_dir / vol_filename, should_cancel=should_cancel)
+                backup_volume_to_file(vol_name, volumes_dir / vol_filename, should_cancel=should_cancel,
+                                       on_bytes=on_bytes)
 
         binds_dir = backup_dir / "binds"
         bind_mounts_meta = []
@@ -322,10 +334,11 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
                 on_progress(step, f"Streaming bind mount {destination} to storage target", total_steps)
                 relative_path = f"{sanitize_name(name)}/{ts}/binds/{bind_filename}"
                 stream_volume_to_target(source, target_type, target_config_json, relative_path,
-                                        should_cancel=should_cancel)
+                                        should_cancel=should_cancel, on_bytes=on_bytes)
             else:
                 on_progress(step, f"Archiving bind mount {destination}", total_steps)
-                backup_volume_to_file(source, binds_dir / bind_filename, should_cancel=should_cancel)
+                backup_volume_to_file(source, binds_dir / bind_filename, should_cancel=should_cancel,
+                                       on_bytes=on_bytes)
 
         if container_stopped:
             step += 1
@@ -406,7 +419,8 @@ def backup_landscape(dest_root: Path = BACKUPS_DIR, project_filter: Optional[str
                       on_progress: ProgressCallback = _noop_progress,
                       stream_target: Optional[StreamTarget] = None,
                       should_cancel: ShouldCancel = _never_cancel,
-                      stop_containers: bool = False) -> BackupResult:
+                      stop_containers: bool = False,
+                      on_bytes: BytesCallback = None) -> BackupResult:
     containers = list_landscape_containers(project_filter, name_contains)
     ts = _timestamp()
     landscape_name = label or project_filter or name_contains or "landscape"
@@ -424,7 +438,7 @@ def backup_landscape(dest_root: Path = BACKUPS_DIR, project_filter: Optional[str
             break
         on_progress(idx, f"Backing up {c.name} ({idx}/{total})", total)
         result = backup_container(c.name, dest_root, stream_target=stream_target, should_cancel=should_cancel,
-                                   stop_container=stop_containers)
+                                   stop_container=stop_containers, on_bytes=on_bytes)
         member_names.append(result.name)
         member_results.append(result)
         if result.cancelled:

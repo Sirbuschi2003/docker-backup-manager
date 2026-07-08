@@ -96,11 +96,14 @@ def _run_landscape_job(job_id: str, label: Optional[str], project_filter: Option
         def progress(step, name, total=None):
             job_tracker.update_progress(job_id, step, name, total)
 
+        def on_bytes(n):
+            job_tracker.update_bytes(job_id, n)
+
         stream_target = storage_sync.resolve_stream_target(db, stream_volumes_target_id)
         result = backup_engine.backup_landscape(
             BACKUPS_DIR, project_filter=project_filter, label=label, on_progress=progress,
             stream_target=stream_target, should_cancel=lambda: job_tracker.is_cancel_requested(job_id),
-            stop_containers=stop_containers,
+            stop_containers=stop_containers, on_bytes=on_bytes,
         )
         record = BackupRecord(
             backup_type="landscape",

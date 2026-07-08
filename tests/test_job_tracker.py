@@ -70,3 +70,28 @@ def test_cancel_job_sets_cancelled_status():
 def test_running_job_is_cancellable_in_to_dict():
     job = job_tracker.create_job("backup", "app")
     assert job.to_dict()["cancellable"] is True
+
+
+def test_update_bytes_accumulates_and_reports_speed(monkeypatch):
+    job = job_tracker.create_job("backup", "app")
+
+    t = [1000.0]
+    monkeypatch.setattr(job_tracker.time, "time", lambda: t[0])
+
+    job_tracker.update_bytes(job.id, 1_000_000)
+    t[0] += 1.0
+    job_tracker.update_bytes(job.id, 2_000_000)
+
+    d = job_tracker.get_job(job.id).to_dict()
+    assert d["bytes_done"] == 3_000_000
+    assert d["speed_bytes_per_sec"] == 2_000_000
+
+
+def test_speed_is_none_before_finished_job_and_without_samples():
+    job = job_tracker.create_job("backup", "app")
+    assert job.to_dict()["speed_bytes_per_sec"] is None
+
+    job_tracker.update_bytes(job.id, 500)
+    job_tracker.finish_job(job.id, ok=True)
+    # No live speed once the job isn't running anymore, even if bytes were recorded.
+    assert job_tracker.get_job(job.id).to_dict()["speed_bytes_per_sec"] is None

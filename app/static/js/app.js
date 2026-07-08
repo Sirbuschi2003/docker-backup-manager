@@ -39,6 +39,10 @@ function fmtDuration(sec) {
   const m = Math.floor(sec / 60), s = Math.round(sec % 60);
   return `${m}m ${s}s`;
 }
+function fmtSpeed(bytesPerSec) {
+  if (bytesPerSec == null) return null;
+  return `${fmtBytes(bytesPerSec)}/s`;
+}
 
 // ---------- toasts ----------
 let toastStack;
@@ -90,7 +94,9 @@ function renderJobCard(job) {
         <div class="progress-meta">
           <span class="job-step-count">Schritt ${job.current_step}/${job.total_steps}</span>
           <span class="job-elapsed">${job.status === "running"
-            ? "Verstrichen: " + fmtDuration(job.elapsed_seconds) + (job.eta_seconds != null ? " · ETA " + fmtDuration(job.eta_seconds) : "")
+            ? "Verstrichen: " + fmtDuration(job.elapsed_seconds)
+              + (job.eta_seconds != null ? " · ETA " + fmtDuration(job.eta_seconds) : "")
+              + (fmtSpeed(job.speed_bytes_per_sec) ? " · " + fmtSpeed(job.speed_bytes_per_sec) : "")
             : fmtDuration(job.elapsed_seconds)}</span>
         </div>
       </div>
@@ -127,7 +133,9 @@ function updateJobCard(card, job) {
   card.querySelector(".progress-bar > div").style.width = `${job.percent}%`;
   card.querySelector(".job-step-count").textContent = `Schritt ${job.current_step}/${job.total_steps}`;
   card.querySelector(".job-elapsed").textContent = job.status === "running"
-    ? "Verstrichen: " + fmtDuration(job.elapsed_seconds) + (job.eta_seconds != null ? " · ETA " + fmtDuration(job.eta_seconds) : "")
+    ? "Verstrichen: " + fmtDuration(job.elapsed_seconds)
+      + (job.eta_seconds != null ? " · ETA " + fmtDuration(job.eta_seconds) : "")
+      + (fmtSpeed(job.speed_bytes_per_sec) ? " · " + fmtSpeed(job.speed_bytes_per_sec) : "")
     : fmtDuration(job.elapsed_seconds);
   const existingError = card.querySelector(".error-msg");
   if (job.error && !existingError) {

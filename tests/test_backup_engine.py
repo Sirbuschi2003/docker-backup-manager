@@ -321,7 +321,7 @@ def test_backup_container_stops_at_next_checkpoint_when_cancelled(tmp_path: Path
     archived = []
     real_backup_volume_to_file = backup_engine.backup_volume_to_file
 
-    def tracking_backup_volume_to_file(volume_name, dest, should_cancel=backup_engine._never_cancel):
+    def tracking_backup_volume_to_file(volume_name, dest, should_cancel=backup_engine._never_cancel, on_bytes=None):
         archived.append(volume_name)
         real_backup_volume_to_file(volume_name, dest, should_cancel=should_cancel)
 
@@ -348,7 +348,7 @@ def test_backup_landscape_stops_after_a_cancelled_member(tmp_path: Path, monkeyp
                                      error="Backup abgebrochen", cancelled=True)
     calls = []
 
-    def fake_backup_container(name, dest_root, stream_target=None, should_cancel=None, stop_container=None):
+    def fake_backup_container(name, dest_root, stream_target=None, should_cancel=None, stop_container=None, on_bytes=None):
         calls.append(name)
         return cancelled_result
 
@@ -371,7 +371,7 @@ def test_backup_landscape_passes_stop_containers_to_each_member(tmp_path: Path, 
 
     captured = []
 
-    def fake_backup_container(name, dest_root, stream_target=None, should_cancel=None, stop_container=None):
+    def fake_backup_container(name, dest_root, stream_target=None, should_cancel=None, stop_container=None, on_bytes=None):
         captured.append((name, stop_container))
         return BackupResult(ok=True, name=name, path=tmp_path / name / "v1", size_bytes=1)
 
@@ -395,7 +395,7 @@ def test_backup_landscape_carries_member_results_for_tracking(tmp_path: Path, mo
         "app-b": BackupResult(ok=False, name="app-b", path=tmp_path / "app-b" / "v1", error="boom"),
     }
     monkeypatch.setattr(backup_engine, "backup_container",
-                         lambda name, dest_root, stream_target=None, should_cancel=None, stop_container=None: canned_results[name])
+                         lambda name, dest_root, stream_target=None, should_cancel=None, stop_container=None, on_bytes=None: canned_results[name])
 
     result = backup_engine.backup_landscape(dest_root=tmp_path)
 
