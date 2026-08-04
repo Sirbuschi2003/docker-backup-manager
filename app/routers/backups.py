@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app import backup_engine, event_log, job_tracker, storage_sync
+from app import backup_engine, event_log, job_tracker, restic_engine, storage_sync
 from app.auth import get_current_user
 from app.config import BACKUPS_DIR
 from app.database import SessionLocal, get_db
@@ -64,7 +64,25 @@ def delete_backup(backup_id: int, db: Session = Depends(get_db), user: User = De
         if not target:
             continue  # target was deleted since - nothing to clean up there
         try:
-            storage_sync.delete_from_target(target.type, target.config_json, _relative_key(Path(record.path)))
+            if target_id == record.streamed_target_id:
+                # Restic-Backups haben keine Dateien auf dem Ziel die per delete_from_target
+                # gelöscht werden könnten – stattdessen Snapshots per restic forget entfernen.
+                restic_engine.maybe_forget_restic(
+                    Path(record.path), (target.type, target.config_json, target_id)
+                )
+                # Für Nicht-Restic stream-Backups (altes Tar-Streaming) normal löschen
+                meta_path = Path(record.path) / "meta.json"
+                if meta_path.exists():
+                    try:
+                        _meta = json.loads(meta_path.read_text())
+                    except Exception:
+                        _meta = {}
+                else:
+                    _meta = {}
+                if _meta.get("backup_engine") != "restic":
+                    storage_sync.delete_from_target(target.type, target.config_json, _relative_key(Path(record.path)))
+            else:
+                storage_sync.delete_from_target(target.type, target.config_json, _relative_key(Path(record.path)))
         except Exception as exc:  # noqa: BLE001
             remote_errors.append(f"{target.name}: {exc}")
 

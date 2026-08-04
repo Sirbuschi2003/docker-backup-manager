@@ -8,7 +8,7 @@ from pathlib import Path
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from app import backup_engine, event_log, job_tracker, storage_sync
+from app import backup_engine, event_log, job_tracker, restic_engine, storage_sync
 from app.config import BACKUPS_DIR, TZ_NAME
 from app.database import SessionLocal
 from app.models import BackupRecord, Schedule
@@ -139,7 +139,19 @@ def _apply_retention(db, sched: Schedule):
                 if not target:
                     continue
                 try:
-                    storage_sync.delete_from_target(target.type, target.config_json, _relative_key(Path(r.path)))
+                    if target_id == r.streamed_target_id:
+                        restic_engine.maybe_forget_restic(
+                            Path(r.path), (target.type, target.config_json, target_id)
+                        )
+                        meta_path = Path(r.path) / "meta.json"
+                        try:
+                            _meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+                        except Exception:
+                            _meta = {}
+                        if _meta.get("backup_engine") != "restic":
+                            storage_sync.delete_from_target(target.type, target.config_json, _relative_key(Path(r.path)))
+                    else:
+                        storage_sync.delete_from_target(target.type, target.config_json, _relative_key(Path(r.path)))
                 except Exception:  # noqa: BLE001
                     logger.exception("Retention: failed to remove %s from target %s", r.path, target.name)
             backup_engine.delete_backup(r.path)

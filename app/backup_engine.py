@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterator, Optional
 
-from app import encryption
+from app import encryption, restic_engine
 from app.config import BACKUPS_DIR, DOCKER_HELPER_IMAGE
 from app.docker_client import get_client
 
@@ -129,9 +129,13 @@ def _should_backup_bind_mount(source: str) -> bool:
 
 
 def iter_volume_tar_chunks(volume_name: str, should_cancel: ShouldCancel = _never_cancel,
-                            on_bytes: BytesCallback = None) -> Iterator[bytes]:
-    """Streams a tar.gz of a named Docker volume's contents straight from a
+                            on_bytes: BytesCallback = None,
+                            compress: bool = True) -> Iterator[bytes]:
+    """Streams a tar of a named Docker volume's contents straight from a
     disposable helper container's stdout - no bind mount involved at all.
+
+    compress=True  → tar.gz  (für lokale Backups, spart Platz)
+    compress=False → tar     (für Restic-Backups, besseres CDC-Dedup da kein gzip-Rauschen)
 
     This app talks to the Docker daemon over the host's docker.sock rather
     than running its own nested daemon ("Docker outside of Docker"), so a
@@ -171,9 +175,10 @@ def iter_volume_tar_chunks(volume_name: str, should_cancel: ShouldCancel = _neve
     well under a second for any real transfer rate.
     """
     client = get_client()
+    tar_flags = "czf" if compress else "cf"
     container = client.containers.create(
         DOCKER_HELPER_IMAGE,
-        command=["tar", "czf", "-", "-C", "/data", "."],
+        command=["tar", tar_flags, "-", "-C", "/data", "."],
         volumes={volume_name: {"bind": "/data", "mode": "ro"}},
         tty=False,
         log_config={"Type": "none"},
@@ -245,6 +250,21 @@ def restore_volume_from_file(volume_name: str, src_tar_gz: Path) -> None:
     )
 
 
+def restore_volume_from_tar(volume_name: str, src_tar: Path) -> None:
+    """Wie restore_volume_from_file, aber für unkomprimierte .tar (restic dump)."""
+    client = get_client()
+    src_dir = src_tar.parent.resolve()
+    client.containers.run(
+        DOCKER_HELPER_IMAGE,
+        command=["tar", "xf", f"/backup/{src_tar.name}", "-C", "/data"],
+        volumes={
+            volume_name: {"bind": "/data", "mode": "rw"},
+            str(src_dir): {"bind": "/backup", "mode": "ro"},
+        },
+        remove=True,
+    )
+
+
 def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
                       on_progress: ProgressCallback = _noop_progress,
                       stream_target: Optional[StreamTarget] = None,
@@ -271,6 +291,34 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
     container_stopped = False
     # inspect+networks, image, finalize, one per volume, one per bind mount, optional encrypt, optional stop+restart
     total_steps = 3 + len(volume_mounts) + len(bind_mounts) + (1 if encrypt else 0) + (2 if should_stop else 0)
+
+    # Restic is used when stream_target is configured AND the restic binary is
+    # available.  Falls back to the old raw-tar-stream path transparently when
+    # restic is not installed (e.g. in unit-test environments).
+    use_restic = stream_target is not None and restic_engine.is_available()
+    restic_repo_url: Optional[str] = None
+    restic_env: dict = {}
+    restic_smb_conf: Optional[str] = None
+    restic_snapshot_ids: dict = {}
+
+    if use_restic:
+        try:
+            target_type_r, target_config_json_r, _target_id_r = stream_target
+            target_config_r = json.loads(target_config_json_r)
+            restic_password = restic_engine.get_password()
+            restic_repo_url, restic_env, restic_smb_conf = restic_engine.repo_url_and_env(
+                target_type_r, target_config_r, name
+            )
+            restic_engine.init_repo_if_needed(restic_repo_url, restic_env, restic_password)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Restic-Init fehlgeschlagen, falle zurück auf Tar-Stream: %s", exc)
+            use_restic = False
+            if restic_smb_conf:
+                try:
+                    Path(restic_smb_conf).unlink(missing_ok=True)
+                except Exception:
+                    pass
+                restic_smb_conf = None
 
     try:
         _check_cancel(should_cancel, "before start")
@@ -320,7 +368,17 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
             _check_cancel(should_cancel, f"before volume {vol_name}")
             volume_names.append(vol_name)
             vol_filename = f"{sanitize_name(vol_name)}.tar.gz"
-            if stream_target:
+
+            if use_restic:
+                on_progress(step, f"Restic: Sicherung Volume {vol_name}", total_steps)
+                tag = f"{sanitize_name(name)}/{sanitize_name(vol_name)}"
+                snapshot_id = restic_engine.backup_volume_from_stream(
+                    iter_volume_tar_chunks(vol_name, should_cancel=should_cancel, compress=False),
+                    restic_repo_url, restic_env, restic_password, tag,
+                    on_bytes=on_bytes, should_cancel=should_cancel,
+                )
+                restic_snapshot_ids[vol_name] = snapshot_id
+            elif stream_target:
                 target_type, target_config_json, _target_id = stream_target
                 on_progress(step, f"Streaming volume {vol_name} to storage target", total_steps)
                 relative_path = f"{sanitize_name(name)}/{ts}/volumes/{vol_filename}"
@@ -343,7 +401,18 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
                 "source": source, "destination": destination, "filename": bind_filename,
                 "rw": mount.get("RW", True),
             })
-            if stream_target:
+
+            if use_restic:
+                on_progress(step, f"Restic: Sicherung Bind-Mount {destination}", total_steps)
+                bind_key = sanitize_name(destination)
+                tag = f"{sanitize_name(name)}/bind_{bind_key}"
+                snapshot_id = restic_engine.backup_volume_from_stream(
+                    iter_volume_tar_chunks(source, should_cancel=should_cancel, compress=False),
+                    restic_repo_url, restic_env, restic_password, tag,
+                    on_bytes=on_bytes, should_cancel=should_cancel,
+                )
+                restic_snapshot_ids[f"bind_{bind_key}"] = snapshot_id
+            elif stream_target:
                 target_type, target_config_json, _target_id = stream_target
                 on_progress(step, f"Streaming bind mount {destination} to storage target", total_steps)
                 relative_path = f"{sanitize_name(name)}/{ts}/binds/{bind_filename}"
@@ -373,6 +442,10 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
             "docker_api_version": client.version().get("ApiVersion"),
             "streamed_target_id": stream_target[2] if stream_target else None,
         }
+        if use_restic:
+            meta["backup_engine"] = "restic"
+            meta["restic_repo_url"] = restic_repo_url
+            meta["restic_snapshot_ids"] = restic_snapshot_ids
         (backup_dir / "meta.json").write_text(json.dumps(meta, indent=2))
 
         if encrypt:
@@ -405,6 +478,11 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
                 container.start()
             except Exception:  # noqa: BLE001
                 logger.exception("Failed to restart container %s after backup", name)
+        if restic_smb_conf:
+            try:
+                Path(restic_smb_conf).unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 def list_landscape_containers(project_filter: Optional[str] = None,

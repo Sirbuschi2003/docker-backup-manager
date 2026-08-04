@@ -16,10 +16,11 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
+from typing import Optional
 from typing import Callable, Optional
 
-from app import encryption, storage_sync
-from app.backup_engine import ProgressCallback, StreamTarget, _noop_progress, restore_volume_from_file, sanitize_name
+from app import encryption, restic_engine, storage_sync
+from app.backup_engine import ProgressCallback, StreamTarget, _noop_progress, restore_volume_from_file, restore_volume_from_tar, sanitize_name
 from app.config import BACKUPS_DIR
 from app.docker_client import get_client
 
@@ -138,30 +139,79 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
         staging_root.mkdir(parents=True, exist_ok=True)
         stage_dir_ctx = tempfile.TemporaryDirectory(dir=staging_root)
         stage_dir = Path(stage_dir_ctx.name)
-        target_type, target_config_json, _target_id = stream_target
-        volume_files = []
-        for vol_name in volume_names:
-            dest = stage_dir / f"{sanitize_name(vol_name)}.tar.gz"
-            storage_sync.download_from_target(
-                target_type, target_config_json, f"{relative_key}/volumes/{sanitize_name(vol_name)}.tar.gz", dest,
+
+        if meta.get("backup_engine") == "restic":
+            # Restic-Restore: Snapshots per restic dump → unkomprimiertes Tar → Docker-Volume
+            target_type, target_config_json, _target_id = stream_target
+            target_config = json.loads(target_config_json)
+            container_name = meta.get("container_name", "")
+            repo_url = meta.get("restic_repo_url", "")
+            snapshot_ids: dict = meta.get("restic_snapshot_ids", {})
+            password = restic_engine.get_password()
+            _, r_env, smb_conf_path = restic_engine.repo_url_and_env(
+                target_type, target_config, container_name
             )
-            volume_files.append(dest)
-        bind_files = []
-        for bind in bind_mounts_meta:
-            dest = stage_dir / bind["filename"]
-            storage_sync.download_from_target(
-                target_type, target_config_json, f"{relative_key}/binds/{bind['filename']}", dest,
-            )
-            bind_files.append((bind["source"], dest))
+            try:
+                volume_files = []
+                for vol_name in volume_names:
+                    sid = snapshot_ids.get(vol_name)
+                    if not sid:
+                        raise RuntimeError(f"Kein Restic-Snapshot für Volume '{vol_name}' gefunden")
+                    dest = stage_dir / f"{sanitize_name(vol_name)}.tar"
+                    restic_engine.dump_snapshot_to_file(repo_url, r_env, password, sid, dest)
+                    volume_files.append((vol_name, dest, "tar"))
+                bind_files_restic = []
+                for bind in bind_mounts_meta:
+                    bind_key = f"bind_{sanitize_name(bind['destination'])}"
+                    sid = snapshot_ids.get(bind_key)
+                    if not sid:
+                        raise RuntimeError(f"Kein Restic-Snapshot für Bind-Mount '{bind['destination']}' gefunden")
+                    dest = stage_dir / f"{sanitize_name(bind['destination'])}.tar"
+                    restic_engine.dump_snapshot_to_file(repo_url, r_env, password, sid, dest)
+                    bind_files_restic.append((bind["source"], dest))
+            finally:
+                if smb_conf_path:
+                    try:
+                        Path(smb_conf_path).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+            # Reuse the common restore path below, marking files as uncompressed tar
+            _restic_restore = True
+        else:
+            # Altes Tar-Stream-Verfahren
+            target_type, target_config_json, _target_id = stream_target
+            volume_files = []
+            for vol_name in volume_names:
+                dest = stage_dir / f"{sanitize_name(vol_name)}.tar.gz"
+                storage_sync.download_from_target(
+                    target_type, target_config_json, f"{relative_key}/volumes/{sanitize_name(vol_name)}.tar.gz", dest,
+                )
+                volume_files.append(dest)
+            bind_files = []
+            for bind in bind_mounts_meta:
+                dest = stage_dir / bind["filename"]
+                storage_sync.download_from_target(
+                    target_type, target_config_json, f"{relative_key}/binds/{bind['filename']}", dest,
+                )
+                bind_files.append((bind["source"], dest))
+            _restic_restore = False
     else:
         stage_dir_ctx = None
+        _restic_restore = False
         volume_files = sorted((backup_dir / "volumes").glob("*.tar.gz")) if (backup_dir / "volumes").exists() else []
         binds_dir = backup_dir / "binds"
         bind_files = [(bind["source"], binds_dir / bind["filename"]) for bind in bind_mounts_meta
                       if (binds_dir / bind["filename"]).exists()]
 
     try:
-        total_steps = 3 + len(volume_files) + len(bind_files)
+        if _restic_restore:
+            all_vol_entries = volume_files        # list of (vol_name, path, "tar")
+            all_bind_entries = bind_files_restic  # list of (source, path)
+        else:
+            all_vol_entries = [(f.name[:-len(".tar.gz")], f, "tar.gz") for f in volume_files]
+            all_bind_entries = bind_files
+
+        total_steps = 3 + len(all_vol_entries) + len(all_bind_entries)
         step = 1
 
         on_progress(step, "Loading image", total_steps)
@@ -178,23 +228,28 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
             driver = net_attrs.get("Driver", "bridge")
             client.networks.create(net_name, driver=driver)
 
-        for vol_file in volume_files:
-            vol_name = vol_file.name[: -len(".tar.gz")]
+        for vol_name, vol_file, fmt in all_vol_entries:
             step += 1
             on_progress(step, f"Restoring volume {vol_name}", total_steps)
             existing_volumes = {v.name for v in client.volumes.list()}
             if vol_name not in existing_volumes:
                 client.volumes.create(name=vol_name)
-            restore_volume_from_file(vol_name, vol_file)
+            if fmt == "tar":
+                restore_volume_from_tar(vol_name, vol_file)
+            else:
+                restore_volume_from_file(vol_name, vol_file)
 
-        for source, bind_file in bind_files:
+        for source, bind_file in all_bind_entries:
             step += 1
             on_progress(step, f"Restoring bind mount {source}", total_steps)
             # Extracting into `source` (a host path, not a Docker volume name)
             # works the same way restore_volume_from_file already bind-mounts
             # a host path for named volumes - Docker auto-creates the host
             # directory if it doesn't exist yet.
-            restore_volume_from_file(source, bind_file)
+            if _restic_restore:
+                restore_volume_from_tar(source, bind_file)
+            else:
+                restore_volume_from_file(source, bind_file)
     finally:
         if stage_dir_ctx is not None:
             stage_dir_ctx.cleanup()
