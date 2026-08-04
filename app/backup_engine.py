@@ -282,7 +282,8 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
                       stream_target: Optional[StreamTarget] = None,
                       should_cancel: ShouldCancel = _never_cancel,
                       stop_container: bool = False,
-                      on_bytes: BytesCallback = None) -> BackupResult:
+                      on_bytes: BytesCallback = None,
+                      on_upload_bytes: BytesCallback = None) -> BackupResult:
     client = get_client()
     container = client.containers.get(container_id_or_name)
     attrs = container.attrs
@@ -388,6 +389,7 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
                     iter_volume_tar_chunks(vol_name, should_cancel=should_cancel, compress=False),
                     restic_repo_url, restic_env, restic_password, tag,
                     on_bytes=on_bytes, should_cancel=should_cancel,
+                    on_upload_bytes=on_upload_bytes,
                 )
                 restic_snapshot_ids[vol_name] = snapshot_id
             elif stream_target:
@@ -422,6 +424,7 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
                     iter_volume_tar_chunks(source, should_cancel=should_cancel, compress=False),
                     restic_repo_url, restic_env, restic_password, tag,
                     on_bytes=on_bytes, should_cancel=should_cancel,
+                    on_upload_bytes=on_upload_bytes,
                 )
                 restic_snapshot_ids[f"bind_{bind_key}"] = snapshot_id
             elif stream_target:
@@ -524,7 +527,8 @@ def backup_landscape(dest_root: Path = BACKUPS_DIR, project_filter: Optional[str
                       stream_target: Optional[StreamTarget] = None,
                       should_cancel: ShouldCancel = _never_cancel,
                       stop_containers: bool = False,
-                      on_bytes: BytesCallback = None) -> BackupResult:
+                      on_bytes: BytesCallback = None,
+                      on_upload_bytes: BytesCallback = None) -> BackupResult:
     containers = list_landscape_containers(project_filter, name_contains)
     ts = _timestamp()
     landscape_name = label or project_filter or name_contains or "landscape"
@@ -542,7 +546,8 @@ def backup_landscape(dest_root: Path = BACKUPS_DIR, project_filter: Optional[str
             break
         on_progress(idx, f"Backing up {c.name} ({idx}/{total})", total)
         result = backup_container(c.name, dest_root, stream_target=stream_target, should_cancel=should_cancel,
-                                   stop_container=stop_containers, on_bytes=on_bytes)
+                                   stop_container=stop_containers, on_bytes=on_bytes,
+                                   on_upload_bytes=on_upload_bytes)
         member_names.append(result.name)
         member_results.append(result)
         if result.cancelled:

@@ -28,8 +28,9 @@ import os
 import secrets
 import shutil
 import subprocess
+import threading
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Callable, Iterator, Optional
 
 from app.config import BASE_DIR
 
@@ -186,6 +187,46 @@ def _full_env(env: dict, password: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Network upload monitor (reads /proc/net/dev TX bytes from container)
+# ---------------------------------------------------------------------------
+
+def _net_tx_bytes() -> Optional[int]:
+    """Total TX bytes across all non-loopback interfaces from /proc/net/dev."""
+    try:
+        with open("/proc/net/dev") as f:
+            total = 0
+            for line in f.readlines()[2:]:
+                parts = line.split(":")
+                if len(parts) != 2:
+                    continue
+                if parts[0].strip() == "lo":
+                    continue
+                fields = parts[1].split()
+                if len(fields) >= 9:
+                    total += int(fields[8])  # TX bytes column
+            return total
+    except Exception:
+        return None
+
+
+def _start_upload_monitor(on_upload_bytes: Callable, stop_event: threading.Event) -> threading.Thread:
+    """Starts a background thread sampling /proc/net/dev every second."""
+    def _monitor():
+        prev = _net_tx_bytes()
+        while not stop_event.wait(1.0):
+            curr = _net_tx_bytes()
+            if prev is not None and curr is not None:
+                delta = curr - prev
+                if delta > 0:
+                    on_upload_bytes(delta)
+            prev = curr
+
+    t = threading.Thread(target=_monitor, daemon=True)
+    t.start()
+    return t
+
+
+# ---------------------------------------------------------------------------
 # Core restic operations
 # ---------------------------------------------------------------------------
 
@@ -220,14 +261,16 @@ def backup_volume_from_stream(
     tag: str,
     on_bytes=None,
     should_cancel=None,
+    on_upload_bytes: Optional[Callable] = None,
 ) -> str:
     """
     Streamt einen unkomprimierten Tar eines Volumes in ein Restic-Repo.
     Gibt die Restic-Snapshot-ID zurück.
 
-    chunks   – Iterator von Bytes (unkomprimierter Tar-Stream, kein gzip)
-    tag      – wird am Snapshot gespeichert, z. B. "nextcloud/nextcloud_data"
-    on_bytes – Callback mit Byte-Anzahl (für Live-Transferrate in der UI)
+    chunks          – Iterator von Bytes (unkomprimierter Tar-Stream, kein gzip)
+    tag             – wird am Snapshot gespeichert, z. B. "nextcloud/nextcloud_data"
+    on_bytes        – Callback für Leserate (bytes aus Docker-Volume gelesen)
+    on_upload_bytes – Callback für Uploadrate (bytes tatsächlich übers Netz übertragen)
     """
     proc = subprocess.Popen(
         [
@@ -240,6 +283,11 @@ def backup_volume_from_stream(
         stderr=subprocess.PIPE,
         env=_full_env(env, password),
     )
+
+    stop_monitor = threading.Event()
+    monitor_thread = None
+    if on_upload_bytes is not None:
+        monitor_thread = _start_upload_monitor(on_upload_bytes, stop_monitor)
 
     _REPORT_INTERVAL = 1024 * 1024  # on_bytes alle 1 MB aufrufen
     pending = 0
@@ -263,6 +311,10 @@ def backup_volume_from_stream(
         except Exception:
             pass
         raise
+    finally:
+        stop_monitor.set()
+        if monitor_thread is not None:
+            monitor_thread.join(timeout=2)
 
     stdout = proc.stdout.read()
     stderr = proc.stderr.read()

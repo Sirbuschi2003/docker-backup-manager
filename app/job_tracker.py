@@ -14,9 +14,9 @@ from typing import Optional
 
 _lock = threading.Lock()
 _jobs: dict[str, "Job"] = {}
-# (timestamp, cumulative bytes_done) samples per job, newest-trimmed to the
-# last ~10s, used to compute a live transfer speed - see update_bytes().
+# (timestamp, cumulative bytes) samples per job, trimmed to last ~10s.
 _byte_samples: dict[str, deque] = {}
+_upload_byte_samples: dict[str, deque] = {}
 
 
 @dataclass
@@ -34,6 +34,7 @@ class Job:
     finished_at: Optional[float] = None
     cancel_requested: bool = False
     bytes_done: int = 0
+    upload_bytes_done: int = 0
 
     def to_dict(self):
         elapsed = (self.finished_at or time.time()) - self.started_at
@@ -44,15 +45,19 @@ class Job:
             per_step = elapsed / self.current_step
             remaining_steps = max(self.total_steps - self.current_step, 0)
             eta_seconds = round(per_step * remaining_steps, 1)
-        speed_bytes_per_sec = None
-        if self.status == "running":
-            samples = _byte_samples.get(self.id)
-            if samples and len(samples) >= 2:
-                t0, b0 = samples[0]
-                t1, b1 = samples[-1]
-                dt = t1 - t0
-                if dt > 0.2:
-                    speed_bytes_per_sec = round((b1 - b0) / dt)
+
+        def _speed(samples_dict) -> Optional[int]:
+            samples = samples_dict.get(self.id)
+            if not samples or len(samples) < 2:
+                return None
+            t0, b0 = samples[0]
+            t1, b1 = samples[-1]
+            dt = t1 - t0
+            return round((b1 - b0) / dt) if dt > 0.2 else None
+
+        speed_bytes_per_sec = _speed(_byte_samples) if self.status == "running" else None
+        upload_speed_bytes_per_sec = _speed(_upload_byte_samples) if self.status == "running" else None
+
         return {
             "id": self.id,
             "kind": self.kind,
@@ -69,6 +74,7 @@ class Job:
             "cancellable": self.status == "running" and not self.cancel_requested,
             "bytes_done": self.bytes_done,
             "speed_bytes_per_sec": speed_bytes_per_sec,
+            "upload_speed_bytes_per_sec": upload_speed_bytes_per_sec,
         }
 
 
@@ -90,22 +96,35 @@ def update_progress(job_id: str, current_step: int, step_name: str, total_steps:
             job.total_steps = max(total_steps, 1)
 
 
+def _record_sample(samples_dict: dict, job_id: str, cumulative: int) -> None:
+    now = time.time()
+    samples = samples_dict.setdefault(job_id, deque(maxlen=2000))
+    samples.append((now, cumulative))
+    cutoff = now - 10
+    while len(samples) > 2 and samples[0][0] < cutoff:
+        samples.popleft()
+
+
 def update_bytes(job_id: str, delta: int):
-    """Adds delta to the job's cumulative bytes transferred and records a
-    timestamped sample so to_dict() can derive a live speed (bytes/sec) from
-    the last ~10s of samples, rather than an all-time average that would be
-    skewed by fast metadata-only steps."""
+    """Adds delta to the job's cumulative bytes read and records a timestamped
+    sample for live read-speed (Leserate) computation."""
     with _lock:
         job = _jobs.get(job_id)
         if not job:
             return
         job.bytes_done += delta
-        now = time.time()
-        samples = _byte_samples.setdefault(job_id, deque(maxlen=2000))
-        samples.append((now, job.bytes_done))
-        cutoff = now - 10
-        while len(samples) > 2 and samples[0][0] < cutoff:
-            samples.popleft()
+        _record_sample(_byte_samples, job_id, job.bytes_done)
+
+
+def update_upload_bytes(job_id: str, delta: int):
+    """Adds delta to the job's cumulative upload bytes and records a timestamped
+    sample for live upload-speed (Übertragungsrate) computation."""
+    with _lock:
+        job = _jobs.get(job_id)
+        if not job:
+            return
+        job.upload_bytes_done += delta
+        _record_sample(_upload_byte_samples, job_id, job.upload_bytes_done)
 
 
 def finish_job(job_id: str, ok: bool, error: Optional[str] = None, result_backup_id: Optional[int] = None):
@@ -174,3 +193,4 @@ def prune_old_jobs(max_finished: int = 50):
         for j in finished[max_finished:]:
             _jobs.pop(j.id, None)
             _byte_samples.pop(j.id, None)
+            _upload_byte_samples.pop(j.id, None)

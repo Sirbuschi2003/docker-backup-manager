@@ -383,7 +383,7 @@ def test_backup_landscape_stops_after_a_cancelled_member(tmp_path: Path, monkeyp
                                      error="Backup abgebrochen", cancelled=True)
     calls = []
 
-    def fake_backup_container(name, dest_root, stream_target=None, should_cancel=None, stop_container=None, on_bytes=None):
+    def fake_backup_container(name, dest_root, stream_target=None, should_cancel=None, stop_container=None, on_bytes=None, on_upload_bytes=None):
         calls.append(name)
         return cancelled_result
 
@@ -406,7 +406,7 @@ def test_backup_landscape_passes_stop_containers_to_each_member(tmp_path: Path, 
 
     captured = []
 
-    def fake_backup_container(name, dest_root, stream_target=None, should_cancel=None, stop_container=None, on_bytes=None):
+    def fake_backup_container(name, dest_root, stream_target=None, should_cancel=None, stop_container=None, on_bytes=None, on_upload_bytes=None):
         captured.append((name, stop_container))
         return BackupResult(ok=True, name=name, path=tmp_path / name / "v1", size_bytes=1)
 
@@ -430,7 +430,7 @@ def test_backup_landscape_carries_member_results_for_tracking(tmp_path: Path, mo
         "app-b": BackupResult(ok=False, name="app-b", path=tmp_path / "app-b" / "v1", error="boom"),
     }
     monkeypatch.setattr(backup_engine, "backup_container",
-                         lambda name, dest_root, stream_target=None, should_cancel=None, stop_container=None, on_bytes=None: canned_results[name])
+                         lambda name, dest_root, stream_target=None, should_cancel=None, stop_container=None, on_bytes=None, on_upload_bytes=None: canned_results[name])
 
     result = backup_engine.backup_landscape(dest_root=tmp_path)
 

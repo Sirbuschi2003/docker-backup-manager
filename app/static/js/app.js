@@ -96,7 +96,8 @@ function renderJobCard(job) {
           <span class="job-elapsed">${job.status === "running"
             ? "Verstrichen: " + fmtDuration(job.elapsed_seconds)
               + (job.eta_seconds != null ? " · ETA " + fmtDuration(job.eta_seconds) : "")
-              + (fmtSpeed(job.speed_bytes_per_sec) ? " · " + fmtSpeed(job.speed_bytes_per_sec) : "")
+              + (fmtSpeed(job.speed_bytes_per_sec) ? " · Leserate: " + fmtSpeed(job.speed_bytes_per_sec) : "")
+              + (fmtSpeed(job.upload_speed_bytes_per_sec) ? " · Upload: " + fmtSpeed(job.upload_speed_bytes_per_sec) : "")
             : fmtDuration(job.elapsed_seconds)}</span>
         </div>
       </div>
@@ -135,7 +136,8 @@ function updateJobCard(card, job) {
   card.querySelector(".job-elapsed").textContent = job.status === "running"
     ? "Verstrichen: " + fmtDuration(job.elapsed_seconds)
       + (job.eta_seconds != null ? " · ETA " + fmtDuration(job.eta_seconds) : "")
-      + (fmtSpeed(job.speed_bytes_per_sec) ? " · " + fmtSpeed(job.speed_bytes_per_sec) : "")
+      + (fmtSpeed(job.speed_bytes_per_sec) ? " · Leserate: " + fmtSpeed(job.speed_bytes_per_sec) : "")
+      + (fmtSpeed(job.upload_speed_bytes_per_sec) ? " · Upload: " + fmtSpeed(job.upload_speed_bytes_per_sec) : "")
     : fmtDuration(job.elapsed_seconds);
   const existingError = card.querySelector(".error-msg");
   if (job.error && !existingError) {

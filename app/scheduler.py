@@ -39,19 +39,24 @@ def run_schedule(schedule_id: int):
         def on_bytes(n):
             job_tracker.update_bytes(job.id, n)
 
+        def on_upload_bytes(n):
+            job_tracker.update_upload_bytes(job.id, n)
+
         try:
             stream_target = storage_sync.resolve_stream_target(db, sched.stream_volumes_target_id)
             should_cancel = lambda: job_tracker.is_cancel_requested(job.id)  # noqa: E731
             if sched.target_type == "container":
                 result = backup_engine.backup_container(sched.target_ref, BACKUPS_DIR, on_progress=progress,
                                                           stream_target=stream_target, should_cancel=should_cancel,
-                                                          stop_container=sched.stop_containers, on_bytes=on_bytes)
+                                                          stop_container=sched.stop_containers, on_bytes=on_bytes,
+                                                          on_upload_bytes=on_upload_bytes)
             else:
                 result = backup_engine.backup_landscape(BACKUPS_DIR, project_filter=sched.project_filter,
                                                           name_contains=sched.name_contains,
                                                           label=sched.name, on_progress=progress,
                                                           stream_target=stream_target, should_cancel=should_cancel,
-                                                          stop_containers=sched.stop_containers, on_bytes=on_bytes)
+                                                          stop_containers=sched.stop_containers, on_bytes=on_bytes,
+                                                          on_upload_bytes=on_upload_bytes)
 
             record = BackupRecord(
                 backup_type=sched.target_type,
