@@ -175,6 +175,7 @@ def iter_volume_tar_chunks(volume_name: str, should_cancel: ShouldCancel = _neve
     well under a second for any real transfer rate.
     """
     client = get_client()
+    _ensure_helper_image(client)
     tar_flags = "czf" if compress else "cf"
     container = client.containers.create(
         DOCKER_HELPER_IMAGE,
@@ -236,8 +237,18 @@ def stream_volume_to_target(volume_name: str, target_type: str, config_json: str
                                                                   on_bytes=on_bytes))
 
 
+def _ensure_helper_image(client) -> None:
+    """Zieht das Helper-Image wenn es lokal nicht vorhanden ist."""
+    try:
+        client.images.get(DOCKER_HELPER_IMAGE)
+    except Exception:  # noqa: BLE001
+        logger.info("Helper-Image %s nicht lokal vorhanden, wird gezogen …", DOCKER_HELPER_IMAGE)
+        client.images.pull(DOCKER_HELPER_IMAGE)
+
+
 def restore_volume_from_file(volume_name: str, src_tar_gz: Path) -> None:
     client = get_client()
+    _ensure_helper_image(client)
     src_dir = src_tar_gz.parent.resolve()
     client.containers.run(
         DOCKER_HELPER_IMAGE,
@@ -253,6 +264,7 @@ def restore_volume_from_file(volume_name: str, src_tar_gz: Path) -> None:
 def restore_volume_from_tar(volume_name: str, src_tar: Path) -> None:
     """Wie restore_volume_from_file, aber für unkomprimierte .tar (restic dump)."""
     client = get_client()
+    _ensure_helper_image(client)
     src_dir = src_tar.parent.resolve()
     client.containers.run(
         DOCKER_HELPER_IMAGE,
