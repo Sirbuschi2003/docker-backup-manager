@@ -122,7 +122,8 @@ _bg_logger = _logging.getLogger("dbm.remote_cleanup")
 
 def _snapshot_remote_task(record: BackupRecord, db: Session, exclude_id: int = None) -> dict:
     """Sammelt alle für die Remote-Bereinigung nötigen Daten aus einem BackupRecord.
-    Gibt ein reines Dict zurück (kein ORM nötig im Hintergrund-Thread)."""
+    Liest meta.json JETZT (vor der lokalen Löschung) und gibt ein reines Dict zurück
+    das kein ORM mehr benötigt — sicher für Hintergrund-Threads."""
     synced = []
     for target_id in json.loads(record.synced_target_ids or "[]"):
         t = db.query(StorageTarget).filter(StorageTarget.id == target_id).first()
@@ -144,6 +145,16 @@ def _snapshot_remote_task(record: BackupRecord, db: Session, exclude_id: int = N
                 q = q.filter(BackupRecord.id != exclude_id)
             is_last = q.count() == 0
 
+    # Read meta.json NOW — before the local directory is deleted — so the
+    # background thread can forget restic snapshots without needing the file.
+    meta_path = Path(record.path) / "meta.json"
+    meta = {}
+    try:
+        if meta_path.exists():
+            meta = json.loads(meta_path.read_text())
+    except Exception:
+        pass
+
     return {
         "path": record.path,
         "name": record.name,
@@ -151,12 +162,15 @@ def _snapshot_remote_task(record: BackupRecord, db: Session, exclude_id: int = N
         "synced": synced,
         "stream": stream,
         "is_last": is_last,
+        "backup_engine": meta.get("backup_engine", ""),
+        "restic_repo_url": meta.get("restic_repo_url", ""),
+        "restic_snapshot_ids": meta.get("restic_snapshot_ids", {}),
     }
 
 
 def _run_remote_cleanup(task: dict) -> list[str]:
     """Führt die Remote-Bereinigung für ein vorbereitetes Task-Dict durch.
-    Kein DB-Zugriff — kann im Hintergrund-Thread laufen."""
+    Kein DB-Zugriff, kein Lesen von meta.json — sicher im Hintergrund-Thread."""
     errors = []
     rec_path = Path(task["path"])
 
@@ -170,15 +184,33 @@ def _run_remote_cleanup(task: dict) -> list[str]:
         t = task["stream"]
         stream_target = (t["type"], t["config_json"], t["id"])
         try:
-            restic_engine.maybe_forget_restic(rec_path, stream_target)
-            if task["is_last"]:
-                restic_engine.purge_restic_repo(task["name"], stream_target)
-            meta_path = rec_path / "meta.json"
-            try:
-                _meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
-            except Exception:
-                _meta = {}
-            if _meta.get("backup_engine") != "restic":
+            if task["backup_engine"] == "restic":
+                # Forget specific snapshots using pre-read IDs (meta.json is already deleted)
+                repo_url = task["restic_repo_url"]
+                snapshot_ids = task["restic_snapshot_ids"]
+                if repo_url and snapshot_ids:
+                    target_config = json.loads(t["config_json"] or "{}")
+                    password = restic_engine.get_password()
+                    _, env, smb_conf_path = restic_engine.repo_url_and_env(
+                        t["type"], target_config, task["name"]
+                    )
+                    try:
+                        for key, sid in snapshot_ids.items():
+                            try:
+                                restic_engine.forget_snapshot(repo_url, env, password, sid)
+                                _bg_logger.info("Snapshot %s vergessen (%s/%s)", sid[:8], task["name"], key)
+                            except Exception as exc:
+                                _bg_logger.warning("forget_snapshot %s: %s", sid[:8], exc)
+                    finally:
+                        if smb_conf_path:
+                            try:
+                                Path(smb_conf_path).unlink(missing_ok=True)
+                            except Exception:
+                                pass
+                if task["is_last"]:
+                    restic_engine.purge_restic_repo(task["name"], stream_target)
+            else:
+                # Old tar-stream backup: delete the remote directory
                 storage_sync.delete_from_target(t["type"], t["config_json"], _relative_key(rec_path))
         except Exception as exc:
             errors.append(f"{t['name']}: {exc}")
