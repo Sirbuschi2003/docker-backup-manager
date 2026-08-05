@@ -290,10 +290,11 @@ def backup_volume_from_stream(
     should_cancel=None,
     on_upload_bytes: Optional[Callable] = None,
     on_log: Optional[Callable] = None,
-) -> str:
+) -> tuple[str, int]:
     """
     Streamt einen unkomprimierten Tar eines Volumes in ein Restic-Repo.
-    Gibt die Restic-Snapshot-ID zurück.
+    Gibt (snapshot_id, total_bytes_processed) zurück — total_bytes_processed
+    ist die tatsächliche unkomprimierte Datenmenge des Volumes (aus restic summary).
 
     chunks          – Iterator von Bytes (unkomprimierter Tar-Stream, kein gzip)
     tag             – wird am Snapshot gespeichert, z. B. "nextcloud/nextcloud_data"
@@ -437,7 +438,7 @@ def backup_volume_from_stream(
                 sid = data.get("snapshot_id", "")
                 if sid:
                     logger.info("Restic-Snapshot %s erstellt (tag=%s)", sid[:8], tag)
-                    return sid
+                    return sid, data.get("total_bytes_processed", 0)
         except json.JSONDecodeError:
             pass
 

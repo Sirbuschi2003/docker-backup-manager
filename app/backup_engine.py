@@ -401,6 +401,7 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
 
         volumes_dir = backup_dir / "volumes"
         volume_names = []
+        restic_data_bytes: int = 0
         for mount in volume_mounts:
             vol_name = mount["Name"]
             step += 1
@@ -412,13 +413,14 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
                 on_progress(step, f"Restic: Sicherung Volume {vol_name}", total_steps)
                 tag = f"{sanitize_name(name)}/{sanitize_name(vol_name)}"
                 _log(f"Starte restic backup für Volume '{vol_name}' (tag={tag})")
-                snapshot_id = restic_engine.backup_volume_from_stream(
+                snapshot_id, vol_bytes = restic_engine.backup_volume_from_stream(
                     iter_volume_tar_chunks(vol_name, should_cancel=should_cancel, compress=False),
                     restic_repo_url, restic_env, restic_password, tag,
                     on_bytes=on_bytes, should_cancel=should_cancel,
                     on_upload_bytes=on_upload_bytes, on_log=on_log,
                 )
                 restic_snapshot_ids[vol_name] = snapshot_id
+                restic_data_bytes += vol_bytes
                 _log(f"Snapshot {snapshot_id[:8]} für '{vol_name}' erstellt")
             elif stream_target:
                 target_type, target_config_json, _target_id = stream_target
@@ -450,13 +452,14 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
                 tag = f"{sanitize_name(name)}/bind_{bind_key}"
                 _log(f"Starte restic backup für Bind-Mount '{destination}'")
                 try:
-                    snapshot_id = restic_engine.backup_volume_from_stream(
+                    snapshot_id, bind_bytes = restic_engine.backup_volume_from_stream(
                         iter_volume_tar_chunks(source, should_cancel=should_cancel, compress=False),
                         restic_repo_url, restic_env, restic_password, tag,
                         on_bytes=on_bytes, should_cancel=should_cancel,
                         on_upload_bytes=on_upload_bytes, on_log=on_log,
                     )
                     restic_snapshot_ids[f"bind_{bind_key}"] = snapshot_id
+                    restic_data_bytes += bind_bytes
                     _log(f"Snapshot {snapshot_id[:8]} für Bind-Mount '{destination}' erstellt")
                 except BackupCancelled:
                     raise
@@ -499,6 +502,7 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
             meta["backup_engine"] = "restic"
             meta["restic_repo_url"] = restic_repo_url
             meta["restic_snapshot_ids"] = restic_snapshot_ids
+            meta["restic_data_bytes"] = restic_data_bytes
         (backup_dir / "meta.json").write_text(json.dumps(meta, indent=2))
 
         if encrypt:
@@ -510,8 +514,8 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
 
             encryption.encrypt_directory_in_place(backup_dir, on_progress=encrypt_progress)
 
-        size = dir_size_bytes(backup_dir)
-        _log(f"Backup abgeschlossen ({fmtbytes(size)} lokal)")
+        size = restic_data_bytes if use_restic else dir_size_bytes(backup_dir)
+        _log(f"Backup abgeschlossen ({fmtbytes(size)})")
         return BackupResult(ok=True, name=name, path=backup_dir, size_bytes=size, containers=[name],
                              streamed_target_id=stream_target[2] if stream_target else None)
     except BackupCancelled as exc:
