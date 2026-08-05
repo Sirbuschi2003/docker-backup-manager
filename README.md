@@ -1,166 +1,178 @@
 # Docker Backup Manager
 
-Ein webbasiertes, betriebssystem- und Docker-Installations-unabhängiges Tool zum
-Sichern und Wiederherstellen von Docker-Umgebungen — einzelne Container oder die
-gesamte Docker-Landschaft, inklusive Images, Volumes, Netzwerken und
-Konfiguration, sodass ein Backup auf einem völlig anderen Host/OS
-wiederhergestellt werden kann.
+> **Version 1.4.0** — webbasiertes Backup- und Restore-Tool für Docker-Container
 
-Es spricht ausschließlich mit der **Docker Engine API** (über den Docker-Socket),
-nie mit der `docker`-CLI. Dadurch läuft es identisch auf Docker Desktop,
-Synology Container Manager, QNAP Container Station, UGREEN Docker-App oder
-purem Docker Engine auf Linux.
+Ein selbst gehostetes Web-Interface zum Sichern und Wiederherstellen von Docker-Containern — einzeln oder als komplette Gruppe (Landscape). Backups lassen sich lokal, auf SMB-Freigaben (NAS), S3-kompatiblen Diensten, Google Drive, OneDrive und vielen weiteren Cloud-Zielen speichern. Die gesamte Konfiguration erfolgt im Browser, kein Kommandozeilen-Wissen nötig.
+
+Das Tool spricht ausschließlich mit der **Docker Engine API** (über den Docker-Socket), nie mit der `docker`-CLI. Es läuft dadurch identisch auf Docker Desktop, Synology Container Manager, QNAP Container Station, UGREEN Docker-App oder purem Docker Engine auf Linux.
+
+---
+
+## Inhaltsverzeichnis
+
+- [Features](#features)
+- [Architektur](#architektur)
+- [Backup-Format](#backup-format)
+- [Installation](#installation)
+  - [Linux / Docker Compose](#1-linux--docker-compose)
+  - [Synology NAS (DSM 7)](#2-synology-nas-dsm-7)
+  - [QNAP NAS](#3-qnap-nas)
+  - [UGREEN NAS](#4-ugreen-nas)
+  - [Portainer (Stacks)](#5-portainer-stacks)
+  - [Windows / Docker Desktop](#6-windows--docker-desktop)
+  - [Ohne Docker (Entwicklung)](#7-ohne-docker-entwicklung)
+- [Erste Schritte](#erste-schritte)
+- [Backups erstellen](#backups-erstellen)
+  - [Einzelnen Container sichern](#einzelnen-container-sichern)
+  - [Ganze Landscape sichern](#ganze-landscape-sichern)
+  - [Container stoppen (anwendungskonsistent)](#container-stoppen-anwendungskonsistent)
+  - [Volumes direkt streamen](#volumes-direkt-streamen)
+- [Zeitpläne & Aufbewahrung](#zeitpläne--aufbewahrung)
+- [Wiederherstellen](#wiederherstellen)
+  - [Einzelnen Container wiederherstellen](#einzelnen-container-wiederherstellen)
+  - [Gruppe wiederherstellen (Landscape)](#gruppe-wiederherstellen-landscape)
+  - [Auf einem anderen Host wiederherstellen](#auf-einem-anderen-host-wiederherstellen)
+- [Speicherziele (Offsite-Kopien)](#speicherziele-offsite-kopien)
+  - [SMB / CIFS (Windows-Freigabe / NAS)](#smb--cifs-windows-freigabe--nas)
+  - [Lokaler / gemounteter Pfad](#lokaler--gemounteter-pfad)
+  - [S3-kompatibel](#s3-kompatibel)
+  - [Google Drive](#google-drive)
+  - [OneDrive](#onedrive)
+  - [rclone (Dropbox, SFTP, WebDAV, …)](#rclone-dropbox-sftp-webdav-)
+  - [Katalog importieren](#katalog-importieren)
+- [Verschlüsselung](#verschlüsselung)
+- [Sicherheit & Benutzerverwaltung](#sicherheit--benutzerverwaltung)
+  - [Login & Brute-Force-Schutz](#login--brute-force-schutz)
+  - [Session-Timeout](#session-timeout)
+  - [Mehrere Benutzer anlegen (Benutzerverwaltung)](#mehrere-benutzer-anlegen-benutzerverwaltung)
+  - [Passwort zurücksetzen](#passwort-zurücksetzen)
+  - [Betrieb hinter einem Reverse-Proxy](#betrieb-hinter-einem-reverse-proxy)
+- [Logs](#logs)
+- [Umgebungsvariablen – Referenz](#umgebungsvariablen--referenz)
+- [Entwicklung & Tests](#entwicklung--tests)
+
+---
 
 ## Features
 
-- **Backup einzelner Container** oder der **gesamten Docker-Landschaft** (alle
-  Container oder gefiltert nach Compose-Projekt)
-- Backup enthält: Image (`docker save`), alle benannten Volumes, **Bind-Mounts**
-  (Host-Ordner, die direkt in den Container eingehängt sind, z. B. ein
-  Nextcloud-Datenordner auf einer separaten Platte — nicht nur der Verweis
-  darauf, sondern die tatsächlichen Daten), angehängte Custom-Netzwerke und
-  die vollständige Container-Konfiguration. Docker-interne Bind-Mounts wie
-  der Docker-Socket werden automatisch ausgeschlossen.
-- **Wiederherstellung** auf demselben oder einem anderen Host/OS
-- **Zeitbasierte Versionierung**: jedes Backup ist eine eigene Zeitstempel-Version,
-  nichts wird überschrieben
-- **Zeitpläne** (Alle X Stunden/Täglich/Wöchentlich/Monatlich + Uhrzeit, kein
-  Cron-Wissen nötig) pro Container oder für die gesamte Landschaft, inkl.
-  automatischer **Aufbewahrungsrichtlinie** (Anzahl Versionen und/oder Alter in
-  Tagen) und pro Zeitplan frei wählbaren **Speicherzielen** (z. B. ein
-  Zeitplan nach Google Drive, ein anderer nach SMB, ein dritter nur lokal)
-- **Löschen** einzelner Backup-Versionen — entfernt auch die zugehörigen
-  Kopien auf allen Speicherzielen, auf die diese Version hochgeladen wurde
-- **Verschlüsselung at rest**: Backups werden optional mit AES-256 verschlüsselt
-  auf der Platte abgelegt (Schlüssel nur per Umgebungsvariable, nie in der DB)
-- **Fortschrittsanzeige** (Ladebalken + geschätzte Restzeit) bei laufenden
-  Backup-/Restore-Jobs, sichtbar auf jeder Seite der App
-- **Externe Speicherziele** für Offsite-Kopien: **Google Drive/OneDrive**
-  per Login-Button (kein rclone.conf nötig), echtes **SMB/CIFS** mit
-  Benutzername/Passwort und Freigaben-Auflistung per Klick (kein Host-Mount
-  nötig), ein bereits gemounteter SMB/NFS-Pfad, S3-kompatibel (AWS S3, MinIO,
-  Wasabi, ...) nativ, sowie über das mitgelieferte `rclone` Dropbox, Box,
-  pCloud, Mega, SFTP, WebDAV und viele weitere Cloud-Anbieter
-- **Direktes Volume-Streaming** (optional, pro Zeitplan oder manuellem Backup):
-  Volume-Daten gehen direkt an ein Speicherziel (lokaler Pfad, SMB, S3 oder
-  rclone), ohne je lokal zwischengespeichert zu werden — praktisch bei großen
-  Volumes (z. B. Immich-Mediatheken), wenn lokal nicht genug Speicherplatz
-  frei ist. Umgeht dabei die AES-256-Verschlüsselung dieser App (siehe unten).
-- Landschafts-/Projekt-Backups lassen sich **als Ganzes wiederherstellen**
-  (ein Klick stellt alle Mitglieds-Container wieder her) oder gezielt nur
-  einzelne Container daraus
-- **Katalog-Import von einem Speicherziel**: nach einem Totalverlust des alten
-  Hosts genügt es, dasselbe Speicherziel (SMB/S3/lokaler Pfad/rclone) auf dem
-  neuen Host wieder einzurichten und auf „Katalog importieren" zu klicken —
-  die App findet vorhandene Backups automatisch und lädt sie erst beim
-  eigentlichen Wiederherstellen herunter
-- Modernes, responsives Web-UI (hell/dunkel), Login-geschützt mit
-  Brute-Force-Sperre nach Fehlversuchen
+| Bereich | Funktion |
+|---|---|
+| **Backup** | Einzelne Container oder komplette Docker-Landscape (alle Container oder gefiltert nach Compose-Projekt / Namensbestandteil) |
+| **Backup-Inhalt** | Docker-Image (`docker save`), alle benannten Volumes, Bind-Mounts (Host-Ordner, nicht nur der Verweis), Custom-Netzwerke, vollständige Container-Konfiguration |
+| **Restore** | Auf demselben oder einem anderen Host/OS; Container-Name anpassbar; Landscape-Gruppe auf einmal oder nur einzelne Mitglieder |
+| **Parallel-Restore** | Landscape auf einem Parallel-System wiederherstellen mit Name-Präfix (z. B. `staging_`) ohne Produktionssystem zu berühren |
+| **Zeitpläne** | Stündlich / täglich / wöchentlich / monatlich + Uhrzeit, kein Cron-Wissen nötig; Aufbewahrungsrichtlinie (Anzahl Versionen + Alter in Tagen) |
+| **Speicherziele** | SMB/CIFS, lokaler/gemounteter Pfad, S3-kompatibel, Google Drive (OAuth), OneDrive (OAuth), rclone (Dropbox, Box, pCloud, SFTP, WebDAV, …) |
+| **Streaming** | Volume-Daten direkt ans Speicherziel, ohne lokalen Zwischenspeicher (für große Volumes wie Immich-Mediatheken) |
+| **Verschlüsselung** | AES-256-CBC + HMAC-SHA256 at rest (Schlüssel nur per Umgebungsvariable) |
+| **Benutzerverwaltung** | Mehrere Benutzer, Admin- und Nutzer-Rolle; Admin kann Benutzer anlegen, löschen und entsperren |
+| **Sicherheit** | Bcrypt-Passwörter, Brute-Force-Sperre, konfigurierbarer Session-Timeout, optionales HTTPS-only-Cookie |
+| **Logs** | Persistente Ereignishistorie aller Backup-, Restore- und Zeitplan-Läufe |
+| **UI** | Modernes responsives Web-Interface (hell/dunkel), läuft ohne Build-Schritt, Fortschrittsanzeige für laufende Jobs |
+| **Versionierung** | Jedes Backup ist eine eigene Zeitstempel-Version; automatisches Löschen der Offsite-Kopien beim Entfernen einer Version |
+
+---
 
 ## Architektur
 
-- Backend: Python/FastAPI, SQLite (Metadaten), APScheduler (Cron-Jobs)
-- Docker-Zugriff: `docker-py` gegen die Engine-API (Socket/Named Pipe/TCP)
-- Frontend: reines HTML/CSS/JS ohne Build-Schritt (Vite/Node nicht nötig)
-- Alles läuft in einem einzigen Container; Backups liegen unter `/data`
-
-## Backup-Format (portabel)
-
 ```
-<container_name>/<timestamp>/
-    meta.json          Metadaten (Format-Version, Docker-Version, ...)
-    container.json      vollständiges `docker inspect`
-    image.tar             `docker save` des Images
-    networks.json         Konfiguration angehängter Custom-Netzwerke
-    volumes/<name>.tar.gz  Inhalt jedes benannten Volumes
-    binds/<pfad>.tar.gz    Inhalt jedes Bind-Mounts (Host-Ordner im Container)
+Browser  ──►  FastAPI (Python)  ──►  Docker Engine API (Socket)
+                    │
+                    ├──► SQLite (Metadaten, Zeitpläne, Benutzer)
+                    ├──► APScheduler (Zeitplan-Ausführung)
+                    ├──► restic (inkrementelle Deduplizierung, Volume-Streaming)
+                    └──► rclone (SMB, S3, Google Drive, OneDrive, Dropbox, …)
 ```
 
-Ein Landschafts-Backup ist einfach eine Sammlung solcher Container-Backups plus
-`_landscapes/<label>/<timestamp>/meta.json` als Verknüpfung.
+- **Backend:** Python 3.12 / FastAPI, SQLite, APScheduler
+- **Backup-Engine:** Alpine-Hilfscontainer für `tar`-Archivierung; `restic` für Deduplizierung und direktes Streaming; `rclone` für externe Ziele
+- **Frontend:** reines HTML/CSS/JavaScript ohne Build-Schritt (kein Node, kein Webpack)
+- **Deployment:** ein einzelner Docker-Container, Daten unter `/data`
+
+---
+
+## Backup-Format
+
+Backups sind portabel und menschenlesbar — kein proprietäres Format:
+
+```
+/data/backups/
+└── <container_name>/
+    └── <YYYYMMDD_HHMMSS>/
+        ├── meta.json           Metadaten (Format-Version, Backup-Typ, Docker-Version, …)
+        ├── container.json      Vollständiges `docker inspect`
+        ├── image.tar           `docker save` des Images
+        ├── networks.json       Konfiguration angehängter Custom-Netzwerke
+        ├── volumes/
+        │   └── <name>.tar.gz   Inhalt jedes benannten Volumes
+        └── binds/
+            └── <pfad>.tar.gz   Inhalt jedes Bind-Mounts (Host-Ordner)
+```
+
+Ein **Landscape-Backup** ist eine Sammlung solcher Container-Backups plus einem Verzeichnis `_landscapes/<label>/<timestamp>/` mit Metadaten als Verknüpfung. Die Mitglieds-Container-Backups sind normale Container-Backups und können unabhängig wiederhergestellt werden.
+
+Beim **direkten Volume-Streaming** (restic-Modus) landen die Volume-Daten nicht lokal, sondern in einem restic-Repository auf dem Speicherziel (`<ziel>/docker-backup/<container>/restic_repo`).
+
+---
 
 ## Installation
 
-Voraussetzung überall: ein laufender Docker-Host mit Zugriff auf den
-Docker-Socket (`/var/run/docker.sock`). Das Tool selbst läuft am einfachsten
-ebenfalls als Container.
-
-### 1. Ubuntu / Debian / beliebiger Linux-Host mit Docker
+### 1. Linux / Docker Compose
 
 ```bash
 git clone https://github.com/sirbuschi2003/docker-backup-manager.git
 cd docker-backup-manager
-cp docker-compose.yml docker-compose.override.yml   # optional, für eigene Anpassungen
 docker compose up -d --build
 ```
 
-Danach: `http://<server-ip>:8420` öffnen und Admin-Konto anlegen.
+Danach: `http://<server-ip>:8420` im Browser öffnen und Admin-Konto anlegen.
+
+Das Verzeichnis `./data` neben der `docker-compose.yml` enthält die Datenbank und alle Backups — regelmäßig sichern.
+
+---
 
 ### 2. Synology NAS (DSM 7, Container Manager)
 
-1. Über **Container Manager → Projekt → Erstellen** ein neues Projekt anlegen,
-   Pfad wählen (z. B. `/docker/docker-backup-manager`), Repository dieses
-   Projekts dorthin klonen oder `docker-compose.yml` + `Dockerfile` + `app/`
-   + `requirements.txt` per File Station hochladen.
-2. Als Quelle „docker-compose.yml erstellen/importieren" wählen und den
-   Inhalt dieser Datei einfügen.
-3. Volume-Pfad `./data` zeigt auf einen Ordner innerhalb des Shared Folder
-   (z. B. `/volume1/docker/docker-backup-manager/data`).
-4. Der Docker-Socket liegt bei Synology unter `/var/run/docker.sock` — das
-   Compose-File mountet ihn bereits korrekt.
-5. Projekt starten, Port 8420 in der Fritzbox/Router-Firewall bei Bedarf
-   freigeben, `http://<nas-ip>:8420` aufrufen.
+1. Über **Container Manager → Projekt → Erstellen** ein neues Projekt anlegen.
+2. Pfad wählen (z. B. `/docker/docker-backup-manager`) und die Dateien per File Station hochladen: `docker-compose.yml`, `Dockerfile`, `requirements.txt` und den Ordner `app/`.
+3. Als Quelle „Docker-Compose-YAML erstellen/importieren" wählen.
+4. Projekt starten, danach `http://<nas-ip>:8420` aufrufen.
 
-### 3. QNAP NAS (Container Station)
+Der Volume-Pfad `./data` zeigt automatisch in den Synology-Projektordner (z. B. `/volume1/docker/docker-backup-manager/data`). Der Docker-Socket liegt bei Synology unter `/var/run/docker.sock` — der Compose-Mount ist bereits korrekt gesetzt.
 
-1. Container Station → **Anwendungen erstellen** → „Docker-Compose YAML
-   erstellen" wählen.
-2. `docker-compose.yml` Inhalt einfügen; Pfade unter `volumes:` auf einen
-   Ordner im QNAP-Freigabeordner anpassen (z. B. `/share/Container/dbm/data`).
-3. QNAP exponiert den Docker-Socket automatisch über Container Station —
-   der Standardmount `/var/run/docker.sock:/var/run/docker.sock` funktioniert.
-4. Erstellen & starten, danach `http://<nas-ip>:8420` öffnen.
+---
 
-### 4. UGREEN NAS (UGOS / Docker-App)
+### 3. QNAP NAS
 
-1. In der UGREEN Docker-App **Compose-Projekt** anlegen (Funktion analog zu
-   Synology/QNAP, basiert ebenfalls auf Container Manager/Portainer-artigem UI).
-2. `docker-compose.yml` einfügen, `./data` auf einen Pfad im UGREEN-Datenpool
-   umbiegen.
-3. Docker-Socket-Mount beibehalten (Standard bei allen genannten NAS-Systemen).
-4. Projekt starten, Port 8420 aufrufen.
+1. **Container Station → Anwendungen erstellen → Docker-Compose YAML erstellen**.
+2. `docker-compose.yml` einfügen; `./data` auf einen QNAP-Freigabeordner anpassen (z. B. `/share/Container/dbm/data`).
+3. QNAP exponiert den Docker-Socket automatisch — der Standard-Mount funktioniert.
+4. Erstellen & starten, danach `http://<nas-ip>:8420`.
 
-### 5. Portainer (Stacks) — funktioniert auf jedem Docker-Host inkl. NAS
+---
 
-Portainer läuft selbst oft auf genau den NAS-Systemen oben (oder auf einem
-separaten Docker-Host) und bietet eine eigene Oberfläche für Compose-Stacks.
-Zwei Wege, das Tool darüber zu deployen:
+### 4. UGREEN NAS
 
-**a) Über Git-Repository (empfohlen, ermöglicht spätere „Pull & Redeploy"):**
+1. In der UGREEN Docker-App **Compose-Projekt anlegen**.
+2. `docker-compose.yml` einfügen, `./data` auf einen Pfad im UGREEN-Datenpool anpassen.
+3. Docker-Socket-Mount beibehalten.
+4. Projekt starten, `http://<nas-ip>:8420` öffnen.
 
-1. **Stacks → Add stack**.
-2. Name vergeben, z. B. `docker-backup-manager`.
-3. Build method: **Repository** wählen.
-4. Repository-URL: `https://github.com/Sirbuschi2003/docker-backup-manager`
-   (bei privatem Repo zusätzlich einen GitHub Personal Access Token unter
-   „Authentication" hinterlegen).
-   **Wichtig:** Der Default-Branch dieses Repos heißt `master`, nicht `main`.
-   Unter „Repository reference" explizit `refs/heads/master` eintragen —
-   sonst bricht Portainer mit `reference not found` ab.
-5. Compose path: `docker-compose.yml` (Standard).
-6. Unter **Environment variables** optional `DBM_SECRET_KEY` setzen.
-7. **Deploy the stack** klicken.
+---
 
-**b) Per Copy-Paste (Web-Editor), ohne Repository-Zugriff:**
+### 5. Portainer (Stacks)
 
-Der Web-Editor kann keinen lokalen Build-Kontext (`build: .`) hochladen —
-dafür wird bei jedem Push auf `master` automatisch ein fertiges Image per
-GitHub Actions nach GHCR gebaut (`.github/workflows/docker-publish.yml`),
-das hier direkt referenziert werden kann.
+**Option A — Git-Repository (empfohlen, ermöglicht „Pull & Redeploy"):**
 
-1. **Stacks → Add stack**, Build method: **Web editor**.
-2. Folgenden Inhalt einfügen (nicht in eine Markdown-Liste eingerückt kopieren,
-   sonst können führende Leerzeichen die YAML-Einrückung durcheinanderbringen):
+1. **Stacks → Add stack**, Build method: **Repository**.
+2. Repository-URL: `https://github.com/Sirbuschi2003/docker-backup-manager`
+3. **Wichtig:** Repository reference auf `refs/heads/master` setzen (nicht `main`).
+4. Unter **Environment variables** optional `DBM_TZ`, `DBM_SECRET_KEY` usw. eintragen.
+5. **Deploy the stack** klicken.
+
+**Option B — Fertig gebautes Image (kein lokaler Build nötig):**
+
+Bei jedem Push auf `master` wird automatisch ein Image per GitHub Actions nach GHCR gebaut. Inhalt für den Web-Editor:
 
 ```yaml
 services:
@@ -171,14 +183,15 @@ services:
     ports:
       - "8420:8420"
     environment:
-      # Alle optional, siehe "Sicherheit" - in Portainer unter "Environment
-      # variables" ausfüllen; ${VAR:-default} sorgt dafür, dass ein leeres Feld
-      # in Portainer nicht zu einem Fehler führt, sondern auf den Standardwert
-      # zurückfällt. Ohne diesen environment-Block hier würden dort eingetragene
-      # Werte nirgendwo ankommen, egal wie oft man redeployt.
       DBM_TZ: "${DBM_TZ:-UTC}"
       DBM_ENCRYPTION_KEY: "${DBM_ENCRYPTION_KEY:-}"
       DBM_SECRET_KEY: "${DBM_SECRET_KEY:-}"
+      DBM_SESSION_HTTPS_ONLY: "${DBM_SESSION_HTTPS_ONLY:-false}"
+      DBM_PUBLIC_URL: "${DBM_PUBLIC_URL:-}"
+      DBM_GOOGLE_CLIENT_ID: "${DBM_GOOGLE_CLIENT_ID:-}"
+      DBM_GOOGLE_CLIENT_SECRET: "${DBM_GOOGLE_CLIENT_SECRET:-}"
+      DBM_MS_CLIENT_ID: "${DBM_MS_CLIENT_ID:-}"
+      DBM_MS_CLIENT_SECRET: "${DBM_MS_CLIENT_SECRET:-}"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - dbm_data:/data
@@ -186,27 +199,11 @@ volumes:
   dbm_data:
 ```
 
-3. Da das Repository **privat** ist, ist das gebaute Package auf GHCR
-   standardmäßig ebenfalls privat. Entweder:
-   - auf GitHub unter **Packages → docker-backup-manager → Package settings →
-     Change visibility → Public** stellen, oder
-   - in Portainer unter **Registries** eine GHCR-Registry mit einem GitHub
-     Personal Access Token (Scope `read:packages`) hinterlegen und beim
-     Stack-Deploy diese Registry auswählen.
-4. **Deploy the stack** klicken.
+Da das Repository privat ist, ist auch das GHCR-Package standardmäßig privat. Entweder unter **GitHub → Packages → docker-backup-manager → Package settings → Change visibility → Public** stellen, oder in Portainer unter **Registries** eine GHCR-Registry mit einem GitHub Personal Access Token (Scope `read:packages`) hinterlegen.
 
-Falls du stattdessen selbst bauen möchtest (z. B. eigener Image-Name/Tag):
+---
 
-```bash
-docker build -t ghcr.io/<dein-user>/docker-backup-manager:latest .
-docker push ghcr.io/<dein-user>/docker-backup-manager:latest
-```
-
-In beiden Fällen: Docker-Socket-Mount und persistentes `/data`-Volume nicht
-vergessen, sonst gehen Backups/Zeitpläne bei einem Container-Neustart verloren.
-Danach `http://<host-ip>:8420` öffnen.
-
-### 6. Windows (Docker Desktop) — z. B. zum Testen
+### 6. Windows / Docker Desktop
 
 ```powershell
 git clone https://github.com/sirbuschi2003/docker-backup-manager.git
@@ -214,269 +211,384 @@ cd docker-backup-manager
 docker compose up -d --build
 ```
 
-Docker Desktop muss laufen (WSL2-Backend empfohlen). Danach
-`http://localhost:8420` öffnen.
+Docker Desktop muss laufen (WSL2-Backend empfohlen). Danach `http://localhost:8420` öffnen.
 
-### Ohne Docker starten (lokale Entwicklung/Test)
+---
+
+### 7. Ohne Docker (Entwicklung)
 
 ```bash
 python -m venv .venv
-./.venv/Scripts/activate  # Windows: .venv\Scripts\activate
+# Linux/Mac:
+source .venv/bin/activate
+# Windows:
+.venv\Scripts\activate
+
 pip install -r requirements.txt
 DBM_BASE_DIR=./data uvicorn app.main:app --host 0.0.0.0 --port 8420
 ```
 
-Achtung: In diesem Modus muss der Rechner selbst Zugriff auf einen
-Docker-Daemon haben (z. B. lokal installierter Docker Engine/Docker Desktop),
-da die Backup/Restore-Funktionen die Docker-API benötigen.
+In diesem Modus muss der Rechner Zugriff auf einen laufenden Docker-Daemon haben (lokaler Docker Engine / Docker Desktop).
 
-## Erste Schritte nach der Installation
+---
 
-1. Beim ersten Aufruf wird ein Admin-Konto angelegt (Benutzername + Passwort,
-   min. 8 Zeichen).
-2. Unter **Container** siehst du alle laufenden/gestoppten Container des Hosts
-   und kannst pro Container ein sofortiges Backup starten, oder mit
-   „Gesamte Landschaft sichern" alles auf einmal sichern. Sind Speicherziele
-   konfiguriert, fragt die App dabei kurz nach, an welche(s) davon zusätzlich
-   hochgeladen werden soll (Checkboxen, alle aktivierten vorausgewählt).
-3. Unter **Backups** siehst du alle Versionen je Container/Landschaft,
-   kannst wiederherstellen, herunterladen (Dateisystem) oder löschen (löscht
-   automatisch auch die Kopien auf allen Speicherzielen mit, auf die diese
-   Version hochgeladen wurde).
-4. Unter **Zeitpläne** legst du Zeitpläne mit Aufbewahrungsrichtlinie an
-   (Häufigkeit Alle X Stunden/Täglich/Wöchentlich/Monatlich + Uhrzeit
-   auswählen — kein Cron-Wissen nötig, z. B. täglich 03:00 Uhr, letzte 7
-   Versionen behalten)
-   **und wählst dort
-   explizit aus, an welche(s) Speicherziel(e) dieser Zeitplan hochladen soll**
-   (Checkboxen im Zeitplan-Dialog — leer lassen für „nur lokal“). So kannst du
-   z. B. einen Zeitplan nach Google Drive und einen anderen nach SMB laufen
-   lassen. Bei „Gesamte Docker-Landschaft" lässt sich zusätzlich auf **ein
-   einzelnes Compose-Projekt** einschränken — praktisch für Multi-Container-
-   Anwendungen wie Immich oder Nextcloud (App-Server, Datenbank, Redis, ... als
-   ein zusammengehöriges Backup, statt Container einzeln oder die komplette
-   Landschaft zu sichern). Manche Multi-Container-Apps setzen aber gar kein
-   Docker-Compose-Projekt-Label (z. B. **Nextcloud All-in-One**, dessen
-   Mastercontainer die anderen Container direkt über die Docker-API anlegt) —
-   die tauchen dann in der Projekt-Auswahl nicht auf. Dafür gibt es alternativ
-   das Feld **„Name enthält"**: ein Namensbestandteil wie `nextcloud-aio`
-   bündelt alle Container, deren Name diesen Text enthält, unabhängig von
-   Compose-Labels. **Wichtig:** Zeitpläne werden standardmäßig in **UTC**
-   ausgewertet, nicht in deiner lokalen Zeit — ohne `DBM_TZ` läuft ein für
-   03:00 Uhr geplantes Backup tatsächlich um 03:00 UTC (in Deutschland je nach
-   Jahreszeit 1–2 Stunden später). Setze `DBM_TZ` auf deine IANA-Zeitzone
-   (z. B. `Europe/Berlin`) und starte den Container neu. Die aktuelle
-   Serverzeit + eingestellte Zeitzone werden zur Kontrolle unter
-   **Einstellungen** live angezeigt.
-5. Unter **Einstellungen** kannst du Speicherziele für Offsite-Kopien anlegen:
-   - **SMB/CIFS (empfohlen für Windows-Freigaben/NAS)**: Server, Freigabename,
-     Benutzername + Passwort direkt in der App eintragen — kein Host-Mount,
-     kein privilegierter Container nötig. Das ist die Option für „echte“
-     Zugangsdaten. Server, Benutzername und Passwort eintragen und auf
-     „Freigaben anzeigen" klicken, um die vorhandenen Freigaben auf diesem
-     Server aufzulisten, statt den Namen erraten/eintippen zu müssen.
-   - **Bereits gemounteter Pfad (SMB/NFS am Host)**: Alternative, falls die
-     Freigabe schon auf Host-Ebene gemountet ist (Synology/QNAP/UGREEN
-     Freigabenverwaltung oder `/etc/fstab` unter Ubuntu) und nur als Ordner
-     per `docker-compose.yml`-Volume in den Container durchgereicht wird
-     (siehe auskommentierte Zeile in `docker-compose.yml`).
-   - **S3**: Bucket, Endpoint (leer lassen für AWS S3), Access/Secret Key
-     eintragen.
-   - **Google Drive / OneDrive (empfohlen)**: einfach auf „Mit Google/Microsoft
-     anmelden" klicken und im sich öffnenden Popup einloggen — kein
-     `rclone config`, keine Konfigurationsdatei nötig. Voraussetzung: der
-     Betreiber hat einmalig eine OAuth-App registriert (siehe
-     [„Google Drive/OneDrive einrichten"](#google-driveonedrive-einrichten)
-     unten) und die zugehörigen Umgebungsvariablen gesetzt.
-   - **rclone (Dropbox, Box, pCloud, Mega, SFTP, WebDAV, ...)**: für alles,
-     wofür es keine eigene Option gibt — einmalig per `rclone config` (z. B.
-     lokal `rclone config` ausführen), die erzeugte `rclone.conf` als Volume
-     `./rclone.conf:/data/rclone.conf:ro` einbinden, danach im UI den
-     Remote-Namen + Zielpfad eintragen.
+## Erste Schritte
 
-Bei manuell ausgelösten Backups („Backup jetzt“, „Gesamte Landschaft sichern“)
-werden alle aktivierten Speicherziele synchronisiert; bei Zeitplänen nur die
-dort ausgewählten. Der Fortschritt aller laufenden Backup-/Restore-/Sync-Jobs
-erscheint als Ladebalken unten links auf jeder Seite der App. Ein laufendes
-Backup kann dort jederzeit über den „Abbrechen“-Button gestoppt werden — der
-Job läuft bis zum nächsten sicheren Checkpoint weiter (z. B. bis das aktuelle
-Volume fertig kopiert ist), bricht dann sauber ab und räumt bereits
-angelegte, aber unvollständige Backup-Verzeichnisse auf. Ein echtes
-Pause/Fortsetzen gibt es nicht, nur Abbrechen.
+1. **Admin-Konto anlegen:** Beim ersten Aufruf von `http://<host>:8420` erscheint ein Einrichtungsformular — Benutzernamen (min. 3 Zeichen) und Passwort (min. 8 Zeichen) eingeben. Dieser erste Benutzer erhält automatisch **Admin-Rechte**.
 
-### Anwendungskonsistente Backups (Container stoppen)
+2. **Zeitzone einstellen:** Unter **Einstellungen** wird die aktuelle Serverzeit und Zeitzone angezeigt. Ist sie falsch (Standard: UTC), die Umgebungsvariable `DBM_TZ` auf die eigene IANA-Zeitzone setzen (z. B. `Europe/Berlin`) und den Container neu starten.
 
-Standardmäßig läuft ein Backup bei laufendem Container ("crash-konsistent" -
-so, als hätte der Server einen Stromausfall gehabt; für die meisten Apps völlig
-ausreichend, aber bei Datenbanken theoretisch riskant, falls gerade mitten in
-einem Schreibvorgang gesichert wird). Sowohl bei Zeitplänen als auch bei
-manuell gestarteten Backups gibt es dafür optional den Schalter „Container(n)
-vor dem Backup stoppen, danach wieder starten" - damit wird der Container (bei
-einer Landschaft: jeder betroffene Container einzeln) vor dem Archivieren
-seiner Volumes/Bind-Mounts gestoppt und direkt danach wieder gestartet, für ein
-wirklich konsistentes Abbild. Das bedeutet eine kurze Downtime für die Dauer
-des jeweiligen Backups. Der Schalter ist standardmäßig deaktiviert, damit sich
-bestehende Zeitpläne nicht ändern; bereits gestoppte Container werden dabei
-nicht angefasst (kein ungewolltes Starten).
+3. **Container-Übersicht:** Unter **Container** sind alle laufenden und gestoppten Container des Docker-Hosts sichtbar. Von dort kann sofort ein Backup gestartet werden.
 
-### Logübersicht
+4. **Speicherziele anlegen:** Für Offsite-Kopien unter **Einstellungen → Speicherziele** ein SMB-, S3- oder Cloud-Ziel einrichten (siehe [Speicherziele](#speicherziele-offsite-kopien)).
 
-Unter „Logs" in der Seitenleiste gibt es eine chronologische Übersicht aller
-Backup-, Restore- und Zeitplan-Läufe (Start, Erfolg, Fehler, Abbruch) mit
-Zeitstempel - anders als die Fortschrittsanzeigen unten links (die nur
-laufende Jobs zeigen und beim Neustart der App verloren gehen) bleibt diese
-Übersicht dauerhaft in der Datenbank erhalten.
+5. **Zeitpläne einrichten:** Unter **Zeitpläne** automatische Backups mit Aufbewahrungsrichtlinie und Speicherzielen konfigurieren.
 
-### Volumes direkt streamen (ohne lokalen Speicherbedarf)
+---
 
-Standardmäßig wird ein Backup zuerst **komplett lokal** unter `/data/backups`
-geschrieben und erst danach an Speicherziele hochgeladen — dafür muss lokal
-so viel Platz frei sein wie das größte Backup selbst. Bei großen Volumes
-(z. B. eine Immich-Mediathek) kann das zu viel sein.
+## Backups erstellen
 
-Sowohl beim manuellen Backup („Backup jetzt“ / „Gesamte Landschaft sichern“)
-als auch im Zeitplan-Dialog gibt es dafür die Option **„Volumes direkt
-streamen, ohne lokal zu speichern“**: die Volume-Daten (Image und Metadaten
-bleiben weiterhin klein und lokal) gehen dann direkt aus dem
-Sicherungs-Hilfscontainer heraus an das gewählte Speicherziel, ohne je auf
-der lokalen Platte zu landen. Unterstützt für **lokalen Pfad, SMB, S3 und
-rclone** (Google Drive/OneDrive nicht, da deren Upload-API eine bekannte
-Dateigröße vorab braucht).
+### Einzelnen Container sichern
 
-**Wichtig:** Dabei wird die AES-256-Verschlüsselung dieser App für die
-Volume-Daten komplett umgangen (die greift nur bei Dateien, die erst lokal
-geschrieben werden) — nur nutzen, wenn du dem Zielsystem selbst vertraust
-(z. B. eigenes NAS im LAN mit SMB3-Verschlüsselung). Wiederherstellen und
-Löschen funktionieren transparent wie gewohnt: die App lädt die Volume-Daten
-bei Bedarf automatisch vom Speicherziel herunter bzw. löscht sie dort.
+1. **Container**-Seite öffnen.
+2. Beim gewünschten Container auf **„Backup jetzt"** klicken.
+3. Optional: Speicherziele auswählen (Checkboxen der konfigurierten Ziele) und/oder **„Volumes direkt streamen"** aktivieren.
+4. **„Backup starten"** klicken.
 
-### Google Drive/OneDrive einrichten
+Der Fortschritt erscheint als Ladebalken unten links in der App. Ein laufendes Backup kann dort jederzeit über **„Abbrechen"** gestoppt werden — der Job bricht am nächsten sicheren Checkpoint ab und räumt unvollständige Daten auf.
 
-Damit der „Mit Google/Microsoft anmelden"-Button funktioniert, muss einmalig
-(pro Installation, nicht pro Nutzer) eine OAuth-App registriert werden — das
-verlangen Google und Microsoft so, damit nicht jede beliebige App auf fremde
-Konten zugreifen kann. Danach melden sich beliebig viele Nutzer der App ganz
-normal per Login-Fenster an, ohne selbst etwas registrieren zu müssen.
+**Was wird gesichert:**
+- Docker-Image (vollständig, portabel)
+- Alle benannten Volumes (als `.tar.gz`)
+- Alle Bind-Mounts / Host-Ordner (die tatsächlichen Dateien, nicht nur der Pfad-Verweis)
+- Custom-Netzwerke und vollständige Container-Konfiguration
 
-**Voraussetzung für beide:** `DBM_PUBLIC_URL` muss auf die Adresse gesetzt
-sein, unter der du die Web-UI im Browser aufrufst (z. B.
-`http://192.168.1.10:8420` oder `https://backup.deinedomain.de`) — sie wird
-für die OAuth-Rücksprungadresse gebraucht.
+**Was wird nicht gesichert:**
+- Docker-interne Bind-Mounts wie der Docker-Socket (`/var/run/docker.sock`) — werden automatisch ausgeschlossen
+- Einzelne Dateien, die als Bind-Mount gemountet sind (z. B. `/etc/localtime`), werden mit einem Warnhinweis übersprungen — das Backup läuft trotzdem weiter
 
-**Google Drive:**
-1. [Google Cloud Console](https://console.cloud.google.com/) → neues Projekt
-   anlegen → „APIs & Services" → „Library" → **Google Drive API** aktivieren.
-2. „APIs & Services" → „OAuth consent screen": Typ „External" (oder
-   „Internal" bei Google Workspace), App-Namen vergeben. Solange die App
-   „Testing" bleibt, musst du dein eigenes Google-Konto unter „Test users"
-   eintragen.
-3. „Credentials" → „Create Credentials" → „OAuth client ID" → Typ
-   „Web application" → unter „Authorized redirect URIs"
-   `<DBM_PUBLIC_URL>/api/settings/oauth/google/callback` eintragen (z. B.
-   `http://192.168.1.10:8420/api/settings/oauth/google/callback`).
-4. Client-ID + Client-Secret als `DBM_GOOGLE_CLIENT_ID` /
-   `DBM_GOOGLE_CLIENT_SECRET` setzen, Container neu starten.
+---
 
-**OneDrive:**
-1. [Azure Portal](https://portal.azure.com/) → „App registrations" → „New
-   registration". Als Redirect-URI (Typ „Web")
-   `<DBM_PUBLIC_URL>/api/settings/oauth/onedrive/callback` eintragen.
-2. „Certificates & secrets" → „New client secret" erzeugen.
-3. „API permissions" → „Microsoft Graph" → „Delegated permissions" →
-   `Files.ReadWrite` und `offline_access` hinzufügen.
-4. Application (client) ID + das erzeugte Secret als `DBM_MS_CLIENT_ID` /
-   `DBM_MS_CLIENT_SECRET` setzen, Container neu starten. Für private
-   Microsoft-Konten (nicht nur Firmenkonten) `DBM_MS_TENANT=common` lassen
-   (Standard).
+### Ganze Landscape sichern
 
-Beide Zugangsdaten (Client-ID/-Secret) sind reine App-Registrierungen, keine
-persönlichen Zugangsdaten — sie erlauben nichts, solange sich niemand über
-den „Anmelden"-Button tatsächlich einloggt.
+Eine **Landscape** ist eine Gruppe zusammengehöriger Container — z. B. alle Container einer Nextcloud- oder Immich-Instanz.
 
-## Wiederherstellung auf einem anderen System
+1. Auf der **Container**-Seite: **„Gesamte Landschaft sichern"** klicken.
+2. Optional nach **Compose-Projekt** filtern (z. B. `immich`), oder nach **Namensbestandteil** (z. B. `nextcloud-aio` für Anwendungen ohne Compose-Labels).
+3. Speicherziele und Streaming-Option auswählen.
+4. **„Backup starten"** klicken.
 
-**Variante A — Katalog von einem Speicherziel importieren (empfohlen bei
-Totalverlust des alten Hosts):** Docker Backup Manager auf dem neuen Host
-installieren/starten, unter **Einstellungen** dasselbe Speicherziel (SMB, S3,
-lokaler Pfad oder rclone-Remote) erneut anlegen, auf dem deine alten Backups
-liegen, und dort auf **„Katalog importieren"** klicken. Die App durchsucht das
-Ziel nach vorhandenen Backup-Versionen (erkennbar an `meta.json`) und legt
-dafür passende Einträge unter **Backups** an — die eigentlichen Daten werden
-erst beim tatsächlichen Klick auf „Wiederherstellen" automatisch
-heruntergeladen. So brauchst du nichts manuell zu kopieren: Speicherziel
-einrichten, Katalog importieren, wiederherstellen. (Nicht unterstützt für
-Google Drive/OneDrive als Quelle — dort weiterhin Variante B nutzen.)
+Landscape-Backups erscheinen unter **Backups** mit einem eigenen Eintrag. Über den Button **„Mitglieder"** sieht man alle enthaltenen Container mit Backup-Status und kann diese einzeln oder als Gruppe wiederherstellen.
+
+---
+
+### Container stoppen (anwendungskonsistent)
+
+Standardmäßig läuft das Backup bei laufendem Container (*crash-konsistent* — für die meisten Anwendungen völlig ausreichend). Für Datenbanken oder kritische Dienste empfiehlt sich ein **anwendungskonsistentes Backup**:
+
+- Im Backup-Dialog den Schalter **„Container vor dem Backup stoppen, danach wieder starten"** aktivieren.
+- Der Container (bei Landscapes: jeder betroffene Container einzeln) wird dann kurz gestoppt, gesichert und direkt danach wieder gestartet.
+- Bereits gestoppte Container werden nicht angetastet — kein ungewolltes Starten.
+- Der Schalter ist auch in Zeitplänen konfigurierbar.
+
+---
+
+### Volumes direkt streamen
+
+Standardmäßig wird ein Backup **zuerst lokal** unter `/data/backups` geschrieben, dann hochgeladen. Bei großen Volumes (z. B. eine Immich-Mediathek mit Hunderten Gigabyte) kann der lokale Platzbedarf ein Problem sein.
+
+Mit **„Volumes direkt streamen, ohne lokal zu speichern"** gehen die Volume-Daten direkt aus dem Sicherungs-Container an das Speicherziel — ohne je lokal zu landen. Image und Metadaten bleiben klein und werden weiterhin lokal gespeichert.
+
+**Unterstützte Ziele für Streaming:** Lokaler/gemounteter Pfad, SMB, S3, rclone  
+**Nicht unterstützt:** Google Drive / OneDrive (deren API benötigt eine bekannte Dateigröße vorab)
+
+> **Wichtig:** Beim direkten Streaming wird die AES-256-Verschlüsselung dieser App für die Volume-Daten **umgangen** (sie greift nur für lokal geschriebene Dateien). Nur nutzen, wenn dem Zielsystem selbst vertraut wird (z. B. eigenes NAS im LAN mit SMB3-Verschlüsselung).
+
+Wiederherstellen und Löschen funktionieren transparent: die App lädt Volume-Daten bei Bedarf vom Speicherziel herunter bzw. löscht sie dort. Werden alle Backup-Versionen eines Containers auf einem Streaming-Ziel gelöscht, wird auch das restic-Repository auf dem Ziel automatisch entfernt.
+
+---
+
+## Zeitpläne & Aufbewahrung
+
+Unter **Zeitpläne** lassen sich automatische Backups einrichten:
+
+| Feld | Beschreibung |
+|---|---|
+| **Häufigkeit** | Alle X Stunden, täglich, wöchentlich oder monatlich + Uhrzeit |
+| **Ziel** | Einzelner Container oder ganze Landscape (optional nach Projekt/Name filtern) |
+| **Speicherziele** | Checkboxen: welche konfigurierten Ziele soll dieser Zeitplan verwenden? (Leer = nur lokal) |
+| **Streaming** | Volume-Streaming für diesen Zeitplan aktivieren |
+| **Container stoppen** | Anwendungskonsistentes Backup durch kurzes Stoppen |
+| **Versionen behalten** | Anzahl neueste Versionen, die behalten werden (0 = unbegrenzt) |
+| **Alter (Tage)** | Versionen älter als X Tage werden gelöscht (0 = deaktiviert) |
+
+**Zeitzone:** Zeitpläne laufen standardmäßig in UTC. Ohne `DBM_TZ` läuft ein für 03:00 Uhr geplantes Backup tatsächlich um 03:00 UTC (in Deutschland 1–2 Stunden später). `DBM_TZ=Europe/Berlin` in der `docker-compose.yml` setzen und Container neu starten.
+
+**Aufbewahrung:** Werden beim Prüfen der Aufbewahrungsregel Versionen gelöscht, werden automatisch auch die Offsite-Kopien auf allen Speicherzielen entfernt. Bei Landscape-Backups werden auch die Mitglieds-Container-Backups mit bereinigt.
+
+---
+
+## Wiederherstellen
+
+### Einzelnen Container wiederherstellen
+
+1. **Backups**-Seite öffnen, gewünschten Container und Version auswählen.
+2. Auf **„Wiederherstellen"** klicken — das genaue Datum und die Uhrzeit des Backup-Stands werden vor der Bestätigung angezeigt.
+3. Optional den Ziel-Containernamen anpassen (z. B. `mein_container_test` um Namenskonflikte zu vermeiden).
+4. **„Wiederherstellen"** bestätigen.
+
+Die Wiederherstellung deckt ab: Umgebungsvariablen, Ports, Volumes/Binds, Restart-Policy, Netzwerke, Capabilities, Privileged-Mode. Sehr exotische Host-Konfigurationen (komplexe Device-Mappings) müssen ggf. manuell nachjustiert werden.
+
+---
+
+### Gruppe wiederherstellen (Landscape)
+
+Landscape-Backups ermöglichen zwei Modi:
+
+**1. Ganzes Projekt auf einmal wiederherstellen (Überschreiben-Modus):**
+- Unter **Backups** den Landscape-Eintrag wählen → **„Mitglieder"** klicken.
+- **„Ganzes Projekt wiederherstellen"** wählen (Standard-Modus: Überschreiben).
+- Bestätigen — alle enthaltenen Container werden der Reihe nach wiederhergestellt.
+
+**2. Parallel-System / Staging-Restore:**
+- Unter **Mitglieder** den Modus **„Parallel (Name-Präfix)"** wählen.
+- Ein Präfix eingeben (z. B. `staging_` oder `test_`).
+- **„Ganzes Projekt wiederherstellen"** klicken — alle Container erhalten den Präfix vor dem Namen (z. B. `staging_immich_server_01`). Das Produktivsystem bleibt unberührt.
+
+**3. Einzelnen Mitglieds-Container wiederherstellen:**
+- In der Mitglieder-Liste auf **„Einzeln"** klicken und wie gewohnt wiederherstellen.
+
+---
+
+### Auf einem anderen Host wiederherstellen
+
+**Variante A — Katalog von Speicherziel importieren (empfohlen bei Totalverlust):**
+
+1. Docker Backup Manager auf dem neuen Host installieren und starten.
+2. Unter **Einstellungen → Speicherziele** dasselbe Speicherziel erneut anlegen (SMB, S3, lokaler Pfad oder rclone), auf dem die alten Backups liegen.
+3. Auf **„Katalog importieren"** klicken — die App durchsucht das Ziel nach vorhandenen Backup-Versionen und legt passende Einträge unter **Backups** an.
+4. Aus der **Backups**-Liste die gewünschte Version wiederherstellen. Die Daten werden erst beim Klick auf „Wiederherstellen" automatisch heruntergeladen.
+
+> Hinweis: Google Drive / OneDrive werden als Quelle für den Katalog-Import nicht unterstützt — dort Variante B nutzen.
 
 **Variante B — Backup-Ordner manuell übertragen:**
 
-1. Backup-Ordner (bzw. den entsprechenden Zeitstempel-Unterordner) auf den
-   Zielhost übertragen, z. B. per SMB/NFS-Ziel, S3-Download oder `rclone copy`.
-2. Docker Backup Manager auf dem Zielhost installieren/starten (siehe oben),
-   `DBM_BACKUPS_DIR`/`./data/backups` auf den übertragenen Ordner zeigen lassen
-   (oder Backup-Ordner in das bestehende `data/backups`-Verzeichnis kopieren).
-3. In der UI unter **Backups** die passende Version auswählen und
-   „Wiederherstellen" klicken. Container-Name kann dabei angepasst werden,
-   z. B. um Namenskonflikte zu vermeiden. Bei einem Landschafts-/Projekt-Backup
-   („Mitglieder"-Button) kannst du entweder **„Ganzes Projekt wiederherstellen"**
-   klicken, um alle Mitglieds-Container auf einmal wiederherzustellen, oder
-   gezielt nur einen einzelnen Container aus der Liste auswählen.
+1. Backup-Ordner (z. B. per `rclone copy`, SMB-Download oder S3-Sync) auf den Zielhost übertragen.
+2. In die `/data/backups`-Verzeichnisstruktur des neuen Hosts einfügen.
+3. In der UI unter **Backups** die Version auswählen und wiederherstellen.
 
-Hinweis: Die Wiederherstellung deckt die gängigen Container-Einstellungen ab
-(Umgebungsvariablen, Ports, Volumes/Binds, Restart-Policy, Netzwerke,
-Capabilities, Privileged-Mode). Sehr exotische Host-Konfigurationen (z. B.
-komplexe Device-Mappings) müssen ggf. nach der Wiederherstellung manuell
-nachjustiert werden. Ist ein Backup verschlüsselt (siehe unten), entschlüsselt
-die App es beim Wiederherstellen automatisch in ein temporäres Verzeichnis —
-auf der Platte bleibt immer nur die verschlüsselte Version liegen.
+---
+
+## Speicherziele (Offsite-Kopien)
+
+Unter **Einstellungen → Speicherziele** werden externe Backup-Ziele für Offsite-Kopien konfiguriert. Mehrere Ziele können gleichzeitig genutzt werden — pro Zeitplan und manuell wird gewählt, an welche Ziele hochgeladen werden soll.
+
+### SMB / CIFS (Windows-Freigabe / NAS)
+
+Das empfohlene Ziel für Heimnetzwerke und NAS-Systeme: Server-Adresse, Freigabename, Benutzername und Passwort direkt in der App eingeben — kein Host-Mount, kein privilegierter Container nötig.
+
+- Auf **„Freigaben anzeigen"** klicken, um verfügbare Freigaben auf dem Server aufzulisten (statt den Namen zu erraten).
+- Unterstützt SMB2/SMB3 mit Verschlüsselung.
+
+### Lokaler / gemounteter Pfad
+
+Für bereits auf Host-Ebene gemountete Freigaben (Synology/QNAP-Freigabenverwaltung, `/etc/fstab`): Pfad im Container eintragen, der per Volume-Mount eingereicht wird.
+
+In der `docker-compose.yml` die auskommentierte Zeile aktivieren:
+
+```yaml
+volumes:
+  - /mnt/nas-share:/mnt/remote-backup
+```
+
+Danach in den Einstellungen `/mnt/remote-backup` als lokalen Pfad eintragen.
+
+### S3-kompatibel
+
+Bucket, Endpoint (leer für AWS S3), Region, Access Key und Secret Key eintragen. Kompatibel mit AWS S3, MinIO, Wasabi, Backblaze B2 (S3-API) und weiteren S3-kompatiblen Diensten.
+
+### Google Drive
+
+Ermöglicht Backup direkt in Google Drive ohne `rclone config` oder Konfigurationsdatei.
+
+**Einmaliges Setup (pro Installation, nicht pro Benutzer):**
+
+1. [Google Cloud Console](https://console.cloud.google.com/) → Neues Projekt anlegen → **APIs & Services → Library → Google Drive API** aktivieren.
+2. **APIs & Services → OAuth consent screen**: Typ „External", App-Namen vergeben. Im Testing-Status den eigenen Google-Account unter „Test users" eintragen.
+3. **Credentials → Create Credentials → OAuth client ID** → Typ „Web application".  
+   Unter „Authorized redirect URIs" eintragen:  
+   `<DBM_PUBLIC_URL>/api/settings/oauth/google/callback`  
+   (z. B. `http://192.168.1.10:8420/api/settings/oauth/google/callback`)
+4. Client-ID und Client-Secret als Umgebungsvariablen setzen und Container neu starten:
+   ```
+   DBM_GOOGLE_CLIENT_ID=<client-id>
+   DBM_GOOGLE_CLIENT_SECRET=<client-secret>
+   DBM_PUBLIC_URL=http://192.168.1.10:8420
+   ```
+
+Danach: In den Einstellungen auf **„Mit Google anmelden"** klicken und im Popup einloggen.
+
+### OneDrive
+
+**Einmaliges Setup:**
+
+1. [Azure Portal](https://portal.azure.com/) → **App registrations → New registration**.  
+   Als Redirect-URI (Typ „Web"):  
+   `<DBM_PUBLIC_URL>/api/settings/oauth/onedrive/callback`
+2. **Certificates & secrets → New client secret** erzeugen.
+3. **API permissions → Microsoft Graph → Delegated permissions**: `Files.ReadWrite` und `offline_access` hinzufügen.
+4. Umgebungsvariablen setzen:
+   ```
+   DBM_MS_CLIENT_ID=<application-id>
+   DBM_MS_CLIENT_SECRET=<client-secret>
+   DBM_PUBLIC_URL=http://192.168.1.10:8420
+   ```
+   Für private Microsoft-Konten (nicht nur Firmenkonten): `DBM_MS_TENANT=common` lassen (Standard).
+
+Danach: In den Einstellungen auf **„Mit Microsoft anmelden"** klicken.
+
+### rclone (Dropbox, Box, pCloud, Mega, SFTP, WebDAV, …)
+
+Für alle Cloud-Dienste, für die es keine eigene Option gibt:
+
+1. Lokal `rclone config` ausführen und einen Remote konfigurieren.
+2. Die erzeugte `rclone.conf` in den Container einbinden:
+   ```yaml
+   volumes:
+     - ./rclone.conf:/data/rclone.conf:ro
+   ```
+3. In den Einstellungen: Remote-Name (z. B. `meincloud`) und Zielpfad eintragen.
+
+### Katalog importieren
+
+Nach einem Totalverlust des Hosts genügt es, dasselbe Speicherziel erneut einzurichten und auf **„Katalog importieren"** zu klicken. Die App durchsucht das Ziel nach vorhandenen Backup-Versionen (erkennbar an `meta.json`) und legt passende Einträge unter **Backups** an — die eigentlichen Daten werden erst beim Klick auf „Wiederherstellen" heruntergeladen.
+
+---
 
 ## Verschlüsselung
 
-Backups können optional mit **AES-256 (CBC) + HMAC-SHA256** verschlüsselt
-auf der Platte abgelegt werden (encrypt-then-MAC, gestreamt in Blöcken, damit
-auch mehrere Gigabyte große Volume-Archive nicht komplett in den Arbeitsspeicher
-geladen werden müssen).
+Backups können optional mit **AES-256-CBC + HMAC-SHA256** verschlüsselt auf der Platte abgelegt werden (encrypt-then-MAC, gestreamt in Blöcken — auch Gigabyte-große Archive brauchen keinen vollständigen RAM-Puffer).
 
-1. Schlüssel erzeugen: `openssl rand -base64 32` (oder
-   `python -c "import secrets,base64;print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"`).
-2. Als Umgebungsvariable `DBM_ENCRYPTION_KEY` setzen (in der `docker-compose.yml`
-   oder in Portainer unter „Environment variables“) und den Container neu starten.
-3. Ab dann werden **alle neuen** Backups automatisch verschlüsselt — sichtbar
-   unter Einstellungen als „🔒 Aktiv“. Bereits vorhandene, unverschlüsselte
-   Backups bleiben unverschlüsselt, bis sie erneut gesichert werden.
+**Einrichten:**
 
-**Wichtig:** Der Schlüssel wird ausschließlich aus der Umgebungsvariable gelesen,
-nie in der Datenbank gespeichert. Das bedeutet auch: **Geht der Schlüssel
-verloren, sind die damit verschlüsselten Backups unwiderruflich nicht mehr
-entschlüsselbar.** Schlüssel getrennt vom Backup-Speicher sichern (z. B. in
-einem Passwort-Manager)!
+1. Schlüssel erzeugen:
+   ```bash
+   openssl rand -base64 32
+   ```
+2. Als Umgebungsvariable setzen:
+   ```
+   DBM_ENCRYPTION_KEY=<erzeugter-schlüssel>
+   ```
+3. Container neu starten. Ab dann werden **alle neuen** Backups automatisch verschlüsselt — sichtbar unter **Einstellungen** als „🔒 Aktiv".
 
-## Sicherheit
+**Wichtige Hinweise:**
+- Der Schlüssel wird **ausschließlich** aus der Umgebungsvariable gelesen, nie in der Datenbank gespeichert.
+- Geht der Schlüssel verloren, sind die damit verschlüsselten Backups **unwiderruflich nicht mehr entschlüsselbar**.
+- Den Schlüssel **getrennt** vom Backup-Speicher sichern (z. B. Passwort-Manager, Bitwarden, Vaultwarden).
+- Bereits vorhandene unverschlüsselte Backups bleiben unverschlüsselt — sie werden beim nächsten Backup-Lauf des jeweiligen Containers erneut gesichert und dann verschlüsselt.
+- Beim Wiederherstellen entschlüsselt die App automatisch in ein temporäres Verzeichnis — auf der Platte liegt immer nur die verschlüsselte Version.
+- Das direkte Volume-Streaming **umgeht** die Verschlüsselung (greift nur für lokal geschriebene Dateien).
 
-- Zugriff auf die Web-UI ist durchgehend loginpflichtig (Session-Cookie,
-  bcrypt-gehashte Passwörter)
-- `DBM_SECRET_KEY` ist **optional**: wird sie nicht gesetzt, erzeugt der
-  Container beim ersten Start automatisch einen zufälligen Schlüssel und
-  speichert ihn als `.secret_key` im Datenvolume (`/data`) — Sessions bleiben
-  damit auch ohne manuelle Konfiguration sicher und überleben Neustarts. Wer
-  mehrere Repliken desselben Volumes betreibt oder den Schlüssel selbst
-  kontrollieren will, kann `DBM_SECRET_KEY` weiterhin explizit setzen.
-- Nach 5 falschen Login-Versuchen wird der Account für 5 Minuten gesperrt
-  (konfigurierbar über `DBM_LOGIN_MAX_ATTEMPTS` / `DBM_LOGIN_LOCKOUT_SECONDS`),
-  um Passwort-Brute-Force zu erschweren.
-- Admin-Passwort vergessen? Direkt im laufenden Container zurücksetzen (legt
-  den Nutzer bei Bedarf auch neu an):
-  ```bash
-  docker exec -it <container-name> python -m app.reset_password admin einneuespasswort123
-  ```
-- `DBM_ENCRYPTION_KEY` setzen, um Backups at-rest zu verschlüsseln (siehe oben)
-  — besonders relevant, wenn Backups auf externe Speicherziele hochgeladen werden
-- Wird die Web-UI hinter TLS (Reverse-Proxy) betrieben, empfiehlt sich
-  zusätzlich `DBM_SESSION_HTTPS_ONLY=true`, damit das Session-Cookie nur noch
-  per HTTPS übertragen wird.
-- Der Container benötigt Zugriff auf den Docker-Socket — das entspricht
-  faktisch Root-Rechten auf dem Host. Nur auf vertrauenswürdigen Hosts
-  betreiben und die Web-UI nicht ungeschützt ins Internet stellen (ggf.
-  hinter einen Reverse-Proxy mit TLS, z. B. Traefik/Caddy/nginx, oder per VPN).
+---
+
+## Sicherheit & Benutzerverwaltung
+
+### Login & Brute-Force-Schutz
+
+- Alle Seiten der App sind loginpflichtig (Session-Cookie mit bcrypt-gehashten Passwörtern).
+- Nach **5 fehlgeschlagenen Login-Versuchen** wird der Account für **5 Minuten gesperrt**.
+- Konfigurierbar per Umgebungsvariable:
+  - `DBM_LOGIN_MAX_ATTEMPTS` (Standard: `5`)
+  - `DBM_LOGIN_LOCKOUT_SECONDS` (Standard: `300` = 5 Minuten)
+
+### Session-Timeout
+
+Die Login-Session läuft standardmäßig nach **7 Tagen** ab. Das bedeutet: nach 7 Tagen ohne Aktivität (oder nach einem Browser-Neustart je nach Cookie-Einstellung) wird man automatisch ausgeloggt.
+
+Der Timeout ist konfigurierbar:
+```
+DBM_SESSION_MAX_AGE=604800   # Sekunden (Standard: 7 Tage = 604800)
+```
+
+Die aktuelle Einstellung (in Stunden) wird unter **Einstellungen → Sitzung & Sicherheit** angezeigt.
+
+### Mehrere Benutzer anlegen (Benutzerverwaltung)
+
+In größeren Umgebungen (Team, Familien-NAS, Unternehmen) können mehrere Benutzer angelegt werden. Es gibt zwei Rollen:
+
+| Rolle | Berechtigungen |
+|---|---|
+| **Admin** | Vollzugriff: Backups, Restore, Zeitpläne, Einstellungen, Benutzerverwaltung |
+| **Nutzer** | Backups, Restore, Zeitpläne — keine Einstellungen und keine Benutzerverwaltung |
+
+**Benutzerverwaltung (nur für Admins):**
+
+Unter **Einstellungen → Benutzerverwaltung** (nur sichtbar für Admins):
+
+- **Tabelle** mit allen Benutzern: Name, Rolle, Erstellt am, Status (Aktiv / Gesperrt)
+- **„Neuen Benutzer anlegen"**: Benutzernamen, Passwort und Rolle (Admin/Nutzer) eingeben
+- **Löschen**: Benutzer entfernen (eigenen Account und letzten Admin kann man nicht löschen)
+- **Entsperren**: Gesperrte Accounts (nach zu vielen Fehlversuchen) manuell freischalten
+
+**Upgrade-Verhalten:** Wer von einer Einzelbenutzer-Installation auf diese Version aktualisiert, bekommt den bestehenden Benutzer automatisch zum Admin — niemand verliert den Zugang.
+
+### Passwort zurücksetzen
+
+Passwort vergessen oder Admin ausgesperrt? Direkt im laufenden Container zurücksetzen:
+
+```bash
+docker exec -it docker-backup-manager python -m app.reset_password <benutzername> <neues-passwort>
+```
+
+Der Benutzer wird bei Bedarf auch neu angelegt, falls er nicht existiert.
+
+### Betrieb hinter einem Reverse-Proxy
+
+Wird die Web-UI über HTTPS (Traefik, Caddy, nginx, …) bereitgestellt:
+
+```
+DBM_SESSION_HTTPS_ONLY=true
+```
+
+Das Session-Cookie wird dann nur noch über verschlüsselte Verbindungen übertragen.
+
+> **Sicherheitshinweis:** Der Container benötigt Zugriff auf den Docker-Socket — das entspricht faktisch Root-Rechten auf dem Host. Die Web-UI nicht ungeschützt ins öffentliche Internet stellen. Entweder per VPN absichern oder hinter einem Reverse-Proxy mit TLS und ggf. zusätzlicher IP-Beschränkung betreiben.
+
+---
+
+## Logs
+
+Unter **Logs** in der Seitenleiste gibt es eine chronologische Ereignishistorie aller Backup-, Restore- und Zeitplan-Läufe mit Zeitstempel, Ergebnis (Erfolg / Fehler / Abbruch) und Fehlerdetails.
+
+Diese Übersicht bleibt dauerhaft in der Datenbank erhalten — anders als die Fortschrittsanzeige unten links, die nur laufende Jobs zeigt und nach einem Neustart der App weg ist.
+
+---
+
+## Umgebungsvariablen – Referenz
+
+| Variable | Standard | Beschreibung |
+|---|---|---|
+| `DBM_TZ` | `UTC` | IANA-Zeitzone für Zeitpläne (z. B. `Europe/Berlin`) |
+| `DBM_SECRET_KEY` | auto | Session-Cookie-Schlüssel. Wird automatisch erzeugt und als `/data/.secret_key` gespeichert wenn nicht gesetzt |
+| `DBM_SESSION_MAX_AGE` | `604800` | Session-Laufzeit in Sekunden (Standard: 7 Tage) |
+| `DBM_SESSION_HTTPS_ONLY` | `false` | `true` = Session-Cookie nur über HTTPS (für Betrieb hinter Reverse-Proxy) |
+| `DBM_ENCRYPTION_KEY` | — | AES-256-Verschlüsselungsschlüssel (Base64, 32 Bytes). Leer = keine Verschlüsselung |
+| `DBM_LOGIN_MAX_ATTEMPTS` | `5` | Fehlversuche bis zur Account-Sperre |
+| `DBM_LOGIN_LOCKOUT_SECONDS` | `300` | Sperrdauer in Sekunden (Standard: 5 Minuten) |
+| `DBM_BASE_DIR` | `/data` | Basisverzeichnis für Datenbank und Backups |
+| `DBM_BACKUPS_DIR` | `/data/backups` | Speicherort für Backup-Dateien (überschreibt `DBM_BASE_DIR/backups`) |
+| `DBM_DB_PATH` | `/data/dbm.sqlite3` | Pfad zur SQLite-Datenbank |
+| `DBM_DEFAULT_RETENTION_COUNT` | `7` | Standard-Anzahl gehaltener Versionen für neue Zeitpläne |
+| `DBM_DEFAULT_RETENTION_DAYS` | `0` | Standard-Altersgrenze in Tagen für neue Zeitpläne (0 = deaktiviert) |
+| `DBM_HELPER_IMAGE` | `alpine:3.20` | Docker-Image für den Backup-Hilfscontainer |
+| `DBM_PUBLIC_URL` | — | Externe URL der App (z. B. `http://192.168.1.10:8420`), benötigt für OAuth-Rücksprungadressen |
+| `DBM_GOOGLE_CLIENT_ID` | — | Google OAuth Client-ID (für Google Drive) |
+| `DBM_GOOGLE_CLIENT_SECRET` | — | Google OAuth Client-Secret (für Google Drive) |
+| `DBM_MS_CLIENT_ID` | — | Microsoft Azure App-ID (für OneDrive) |
+| `DBM_MS_CLIENT_SECRET` | — | Microsoft Client-Secret (für OneDrive) |
+| `DBM_MS_TENANT` | `common` | Azure-Tenant (Standard `common` = private + Firmenkonten) |
+
+---
 
 ## Entwicklung & Tests
 
@@ -485,8 +597,42 @@ pip install -r requirements.txt pytest httpx
 pytest -q
 ```
 
-Die Test-Suite deckt die reine Logik ab (Retention-Regeln, Namens-Sanitizing,
-Restore-Config-Mapping, Job-Fortschritt, Storage-Sync, sowie einen kompletten
-App-Boot-/Login-Smoketest über `TestClient`). Docker-abhängige Funktionen
-(Backup/Restore realer Container) benötigen einen laufenden Docker-Daemon und
-werden über die App selbst manuell getestet.
+Die Test-Suite deckt Retention-Regeln, Namens-Sanitizing, Restore-Config-Mapping, Job-Fortschritt, Storage-Sync und einen kompletten App-Boot-/Login-Smoketest ab. Docker-abhängige Funktionen (Backup/Restore realer Container) werden über die App selbst manuell getestet.
+
+```bash
+# Einzelnen Test-Modul ausführen
+pytest tests/test_retention.py -v
+
+# App direkt starten (ohne Docker)
+DBM_BASE_DIR=./data uvicorn app.main:app --reload --port 8420
+```
+
+**Projektstruktur:**
+
+```
+app/
+├── main.py              FastAPI-App, Middleware, Router-Registrierung
+├── config.py            Konfiguration via Umgebungsvariablen
+├── models.py            SQLAlchemy-Modelle (BackupRecord, Schedule, User, …)
+├── database.py          DB-Initialisierung und Schema-Migration
+├── auth.py              Authentifizierungs-Abhängigkeiten (get_current_user, get_admin_user)
+├── backup_engine.py     Container-Backup-Logik, Hilfscontainer, tar-Archivierung
+├── restore_engine.py    Container-Wiederherstellungs-Logik
+├── restic_engine.py     Volume-Streaming via restic + rclone
+├── scheduler.py         APScheduler-Integration, Aufbewahrungsrichtlinie
+├── storage_sync.py      Speicherziel-Synchronisierung (SMB, S3, rclone, …)
+├── encryption.py        AES-256-CBC-Verschlüsselung
+├── job_tracker.py       Laufende Job-Fortschrittsverfolgung
+├── event_log.py         Persistente Ereignishistorie
+├── routers/
+│   ├── auth.py          Login, Logout, Benutzerverwaltung
+│   ├── backups.py       Backup-CRUD, Löschen mit Offsite-Bereinigung
+│   ├── containers.py    Container-Liste, Backup auslösen
+│   ├── schedules.py     Zeitplan-CRUD
+│   ├── settings.py      Speicherziele, OAuth, Einstellungen-Übersicht
+│   ├── jobs.py          Job-Fortschritt (SSE)
+│   └── logs.py          Ereignislog-Abfrage
+└── static/
+    ├── index.html       Single-Page-App Shell
+    └── js/app.js        Gesamtes Frontend (vanilla JS, kein Build-Schritt)
+```
