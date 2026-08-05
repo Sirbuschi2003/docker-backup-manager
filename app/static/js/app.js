@@ -107,7 +107,7 @@ function renderJobCard(job) {
       ${job.error ? `<div class="error-msg">${job.error}</div>` : ""}
       <div class="job-log-wrap" style="margin-top:6px;">
         <button type="button" class="btn job-log-toggle" style="padding:2px 8px;font-size:.75rem;opacity:.7;">📋 Log</button>
-        <div class="job-log-panel" style="display:none;margin-top:6px;background:var(--bg2,#1e1e1e);border-radius:4px;padding:8px;max-height:200px;overflow-y:auto;font-family:monospace;font-size:.75rem;line-height:1.5;"></div>
+        <div class="job-log-panel" style="display:none;margin-top:6px;background:#1a1a1a;color:#d0d0d0;border-radius:4px;padding:8px;max-height:200px;overflow-y:auto;font-family:monospace;font-size:.75rem;line-height:1.5;"></div>
       </div>
       ${job.cancellable ? `<div class="row-actions" style="margin-top:8px;"><button type="button" class="btn danger job-cancel-btn" style="padding:4px 10px; font-size:.8rem;">Abbrechen</button></div>` : ""}
     </div>
@@ -232,17 +232,22 @@ async function pollGlobalJobs() {
 
   const now = Date.now();
   for (const job of jobs) {
-    if (job.status !== "running") {
-      if (!toastedJobIds.has(job.id)) {
-        toastedJobIds.add(job.id);
-        toast(`${job.label}: ${job.status === "success" ? "erfolgreich abgeschlossen" : "fehlgeschlagen – " + job.error}`,
-              job.status === "success" ? "ok" : "error");
-        finishedJobHideAt.set(job.id, now + 4000);
+    const terminal = job.status === "success" || job.status === "failed" || job.status === "cancelled";
+    if (terminal && !toastedJobIds.has(job.id)) {
+      toastedJobIds.add(job.id);
+      if (job.status === "success") {
+        toast(`${job.label}: erfolgreich abgeschlossen`, "ok");
+      } else if (job.status === "cancelled") {
+        toast(`${job.label}: abgebrochen`, "ok");
+      } else {
+        toast(`${job.label}: fehlgeschlagen – ${job.error}`, "error");
       }
+      finishedJobHideAt.set(job.id, now + 5000);
     }
   }
 
-  const trayVisible = jobs.filter((j) => j.status === "running" ||
+  // "cancelling" is still active — keep it in the tray until it's fully done.
+  const trayVisible = jobs.filter((j) => j.status === "running" || j.status === "cancelling" ||
     (finishedJobHideAt.has(j.id) && finishedJobHideAt.get(j.id) > now)).slice(0, 5);
   _syncJobCardsInContainer(ensureJobTray(), trayVisible, null);
 
