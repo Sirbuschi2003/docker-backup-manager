@@ -604,10 +604,23 @@ async function backupsPage() {
 
   // Split into landscapes and standalone containers
   const landscapeNames = names.filter((n) => data.groups[n].some((v) => v.backup_type === "landscape"));
-  const containerNames = names.filter((n) => !landscapeNames.includes(n));
+
+  // Collect all member container names across all landscape versions so we can
+  // hide them from "Einzelne Container" (they're accessible via the landscape group)
+  const landscapeMemberNames = new Set();
+  for (const ln of landscapeNames) {
+    for (const v of data.groups[ln]) {
+      (v.member_names || []).forEach((m) => landscapeMemberNames.add(m));
+    }
+  }
+  const containerNames = names.filter((n) => !landscapeNames.includes(n) && !landscapeMemberNames.has(n));
 
   function buildAccordion(name, versions, isLandscape) {
-    const totalSize = versions.reduce((s, v) => s + (v.size_bytes || 0), 0);
+    // For landscapes, sum the member_size_bytes across versions (the landscape
+    // record itself is just a tiny metadata file — the real data is in the members)
+    const totalSize = isLandscape
+      ? versions.reduce((s, v) => s + (v.member_size_bytes || v.size_bytes || 0), 0)
+      : versions.reduce((s, v) => s + (v.size_bytes || 0), 0);
     const icon = isLandscape ? "🗺️" : "📦";
     const acc = h(`
       <div class="accordion${isLandscape ? " accordion-landscape" : ""}">
@@ -634,9 +647,10 @@ async function backupsPage() {
     const tbody = acc.querySelector("tbody");
     versions.forEach((v) => {
       const isLsc = v.backup_type === "landscape";
+      const displaySize = isLsc && v.member_size_bytes ? v.member_size_bytes : (v.size_bytes || 0);
       const row = h(`<tr>
         <td>${fmtDate(v.created_at)}</td>
-        <td>${fmtBytes(v.size_bytes)}</td>
+        <td>${fmtBytes(displaySize)}</td>
         <td><span class="badge ${v.status === "ok" ? "ok" : "failed"}">${v.status}</span></td>
         <td style="display:flex; gap:8px;">
           ${isLsc

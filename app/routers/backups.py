@@ -35,9 +35,11 @@ def list_backups(db: Session = Depends(get_db), user: User = Depends(get_current
         db.commit()
         records = [r for r in records if r not in stale]
 
+    records_by_path = {r.path: r for r in records}
+
     grouped: dict[str, list] = {}
     for r in records:
-        grouped.setdefault(r.name, []).append({
+        entry: dict = {
             "id": r.id,
             "backup_type": r.backup_type,
             "status": r.status,
@@ -45,7 +47,28 @@ def list_backups(db: Session = Depends(get_db), user: User = Depends(get_current
             "size_bytes": r.size_bytes,
             "created_at": r.created_at.isoformat() + "Z",
             "containers": json.loads(r.containers_json) if r.containers_json else [],
-        })
+        }
+        if r.backup_type == "landscape":
+            member_names: list[str] = []
+            member_size = 0
+            landscape_dir = Path(r.path)
+            if landscape_dir.exists():
+                for jf in sorted(landscape_dir.glob("*.json")):
+                    try:
+                        d = json.loads(jf.read_text())
+                        cname = d.get("container_name", jf.stem)
+                        bpath = d.get("backup_path", "")
+                        member_names.append(cname)
+                        mem_rec = records_by_path.get(bpath)
+                        if mem_rec:
+                            member_size += mem_rec.size_bytes or 0
+                    except Exception:
+                        pass
+            else:
+                member_names = json.loads(r.containers_json) if r.containers_json else []
+            entry["member_names"] = member_names
+            entry["member_size_bytes"] = member_size
+        grouped.setdefault(r.name, []).append(entry)
     return {"groups": grouped}
 
 
