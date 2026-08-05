@@ -389,14 +389,17 @@ def backup_volume_from_stream(
         if monitor_thread is not None:
             monitor_thread.join(timeout=2)
 
-    # Wait for restic to finish.  Poll in 60 s intervals so we can detect a
-    # hung process (no stdout output for _RESTIC_HANG_TIMEOUT seconds) and
-    # kill it rather than blocking the backup thread indefinitely.
+    # Wait for restic to finish.  Poll in 5 s intervals so we can respond to
+    # cancellation requests and detect a hung process without blocking forever.
     while True:
         try:
-            proc.wait(timeout=60)
+            proc.wait(timeout=5)
             break
         except subprocess.TimeoutExpired:
+            if should_cancel and should_cancel():
+                _log("Backup wird abgebrochen — restic wird beendet …")
+                proc.kill()
+                raise RuntimeError("Backup abgebrochen")
             idle = time.monotonic() - last_output_at[0]
             if idle > _RESTIC_HANG_TIMEOUT:
                 _log(
@@ -408,7 +411,7 @@ def backup_volume_from_stream(
                     f"restic backup hängt: kein Fortschritt seit {int(idle // 60)} Minuten — "
                     "Prozess abgebrochen. Mögliche Ursache: SMB-Verbindung zum NAS unterbrochen."
                 )
-            if idle > 60:
+            if idle > 60 and int(idle) % 30 < 5:
                 _log(f"restic schreibt auf NAS … (letzte Aktivität vor {int(idle)}s)")
             logger.debug("restic läuft noch, letzte Ausgabe vor %.0fs", idle)
 

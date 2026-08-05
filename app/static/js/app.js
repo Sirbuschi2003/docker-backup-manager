@@ -126,13 +126,18 @@ function _wireJobLogToggle(card, jobId) {
   async function refreshLog() {
     try {
       const data = await api(`/api/jobs/${jobId}/logs`);
-      if (!data.lines.length) return;
       const atBottom = panel.scrollHeight - panel.scrollTop <= panel.clientHeight + 20;
+      if (!data.lines.length) {
+        panel.innerHTML = '<div style="opacity:.5;padding:4px 0">Noch keine Log-Einträge — Backup läuft noch oder wurde vor diesem Update gestartet.</div>';
+        return;
+      }
       panel.innerHTML = data.lines.map(l =>
         `<div><span style="opacity:.5">${l.ts}</span> ${escHtml(l.msg)}</div>`
       ).join("");
       if (atBottom) panel.scrollTop = panel.scrollHeight;
-    } catch (_) {}
+    } catch (e) {
+      panel.innerHTML = `<div style="color:#f66">Fehler beim Laden: ${escHtml(e.message)}</div>`;
+    }
   }
 
   btn.addEventListener("click", () => {
