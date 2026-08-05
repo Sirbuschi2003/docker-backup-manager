@@ -250,21 +250,54 @@ def restore_backup(backup_id: int, payload: RestorePayload, db: Session = Depend
 
 @router.get("/{backup_id}/members")
 def landscape_members(backup_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    """For a landscape backup, resolve each member container name to its own
-    (matching, same-run) container BackupRecord id so the UI can offer restore
-    per member."""
+    """For a landscape backup, resolve each member container name to the
+    BackupRecord from the SAME run (not just the most-recent one).
+    The landscape directory contains per-member JSON files with the exact
+    backup_path, which we use to look up the matching record."""
     record = db.query(BackupRecord).filter(BackupRecord.id == backup_id).first()
     if not record or record.backup_type != "landscape":
         raise HTTPException(404, "Landscape backup not found")
 
-    members = json.loads(record.containers_json) if record.containers_json else []
+    landscape_dir = Path(record.path)
     result = []
-    for member_name in members:
-        candidate = (
-            db.query(BackupRecord)
-            .filter(BackupRecord.name == member_name, BackupRecord.backup_type == "container")
-            .order_by(BackupRecord.created_at.desc())
-            .first()
-        )
-        result.append({"container_name": member_name, "backup_id": candidate.id if candidate else None})
+
+    if landscape_dir.exists():
+        # Use the per-member JSON files written during the backup run.
+        # Each file: {"container_name": "...", "backup_path": "..."}
+        json_files = sorted(landscape_dir.glob("*.json"))
+        for jf in json_files:
+            try:
+                data = json.loads(jf.read_text())
+                container_name = data.get("container_name", jf.stem)
+                backup_path = data.get("backup_path", "")
+                candidate = (
+                    db.query(BackupRecord)
+                    .filter(BackupRecord.path == backup_path, BackupRecord.name == container_name)
+                    .first()
+                )
+                result.append({
+                    "container_name": container_name,
+                    "backup_id": candidate.id if candidate else None,
+                    "created_at": candidate.created_at.isoformat() + "Z" if candidate else None,
+                    "status": candidate.status if candidate else None,
+                })
+            except Exception:
+                pass
+    else:
+        # Fallback: containers_json name list, match by latest-in-time
+        members = json.loads(record.containers_json) if record.containers_json else []
+        for member_name in members:
+            candidate = (
+                db.query(BackupRecord)
+                .filter(BackupRecord.name == member_name, BackupRecord.backup_type == "container")
+                .order_by(BackupRecord.created_at.desc())
+                .first()
+            )
+            result.append({
+                "container_name": member_name,
+                "backup_id": candidate.id if candidate else None,
+                "created_at": candidate.created_at.isoformat() + "Z" if candidate else None,
+                "status": candidate.status if candidate else None,
+            })
+
     return {"members": result}

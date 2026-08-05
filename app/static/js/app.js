@@ -682,46 +682,87 @@ function openRestoreModal(version) {
 
 async function openLandscapeMembersModal(version) {
   const data = await api(`/api/backups/${version.id}/members`);
-  const restorableCount = data.members.filter((m) => m.backup_id).length;
+  const restorableCount = data.members.filter((m) => m.backup_id && m.status === "ok").length;
   const overlay = h(`
     <div class="modal-overlay">
-      <div class="modal">
-        <h3>Landschafts-Mitglieder</h3>
-        <p class="muted">Jedes Mitglied wird als eigenes Container-Backup wiederhergestellt. Du kannst
-          das ganze Projekt auf einmal wiederherstellen oder gezielt nur einen einzelnen Container.</p>
-        <div class="row-actions" style="justify-content:flex-start; margin-bottom:12px;">
-          <button class="btn primary" id="restore-all-btn" ${restorableCount ? "" : "disabled"}>Ganzes Projekt wiederherstellen (${restorableCount})</button>
+      <div class="modal" style="max-width:560px">
+        <h3>Gruppe wiederherstellen</h3>
+        <p class="muted" style="margin-bottom:12px;">Backup vom ${fmtDate(version.created_at)} · ${restorableCount} Container</p>
+
+        <div id="members-list" style="margin-bottom:16px;"></div>
+
+        <div class="field" style="margin-bottom:8px;">
+          <label>Modus</label>
+          <select id="restore-mode">
+            <option value="replace">Überschreiben — bestehende Container ersetzen</option>
+            <option value="parallel">Parallel — unter neuem Namen neben dem laufenden System</option>
+          </select>
         </div>
-        <div id="members-list"></div>
-        <div class="row-actions"><button class="btn" id="close-btn">Schließen</button></div>
+        <div id="prefix-field" class="field" style="display:none; margin-bottom:8px;">
+          <label>Namenspräfix (z.B. <code>staging_</code>)</label>
+          <input type="text" id="restore-prefix" placeholder="staging_" />
+          <p class="muted" style="margin-top:4px; font-size:12px;">Alle Container und Volumes werden mit diesem Präfix neu erstellt und laufen unabhängig vom Produktivsystem.</p>
+        </div>
+        <div class="field">
+          <label><input type="checkbox" id="restore-start" checked style="width:auto; margin-right:6px;" />Container nach Wiederherstellung starten</label>
+        </div>
+
+        <div class="row-actions">
+          <button class="btn" id="close-btn">Abbrechen</button>
+          <button class="btn primary" id="restore-all-btn" ${restorableCount ? "" : "disabled"}>Alle ${restorableCount} wiederherstellen</button>
+        </div>
       </div>
     </div>
   `);
+
   const list = overlay.querySelector("#members-list");
   data.members.forEach((m) => {
-    const row = h(`<div style="display:flex; justify-content:space-between; align-items:center; padding:8px 0; border-bottom:1px solid var(--border)">
-      <span>${m.container_name}</span>
-      ${m.backup_id ? '<button class="btn">Wiederherstellen</button>' : '<span class="muted">kein Backup gefunden</span>'}
+    const ok = m.backup_id && m.status === "ok";
+    const statusBadge = m.status === "ok" ? '<span class="badge ok">ok</span>' : `<span class="badge failed">${m.status || "kein Backup"}</span>`;
+    const row = h(`<div style="display:flex; justify-content:space-between; align-items:center; padding:6px 0; border-bottom:1px solid var(--border); gap:8px;">
+      <span style="font-weight:500">${escHtml(m.container_name)}</span>
+      <div style="display:flex; align-items:center; gap:8px;">
+        ${statusBadge}
+        ${ok ? '<button class="btn" style="padding:2px 10px; font-size:13px;">Einzeln</button>' : ''}
+      </div>
     </div>`);
     const btn = row.querySelector("button");
     if (btn) btn.addEventListener("click", () => {
       overlay.remove();
-      openRestoreModal({ id: m.backup_id, created_at: version.created_at });
+      openRestoreModal({ id: m.backup_id, created_at: m.created_at || version.created_at });
     });
     list.appendChild(row);
   });
+
+  overlay.querySelector("#restore-mode").addEventListener("change", (e) => {
+    overlay.querySelector("#prefix-field").style.display = e.target.value === "parallel" ? "block" : "none";
+  });
+
   overlay.querySelector("#restore-all-btn").addEventListener("click", async () => {
-    if (!confirm(`Alle ${restorableCount} Container dieses Projekts wiederherstellen? Bestehende Container mit demselben Namen werden dabei nicht automatisch ersetzt (Namenskonflikt möglich).`)) return;
+    const mode = overlay.querySelector("#restore-mode").value;
+    const prefix = mode === "parallel" ? (overlay.querySelector("#restore-prefix").value.trim() || "restored_") : "";
+    const start = overlay.querySelector("#restore-start").checked;
+    const restorable = data.members.filter((m) => m.backup_id && m.status === "ok");
+
+    const names = restorable.map((m) => prefix ? `${prefix}${m.container_name}` : m.container_name).join(", ");
+    if (!confirm(`${restorable.length} Container wiederherstellen?\n\n${names}\n\nDies startet ${restorable.length} separate Wiederherstellungs-Jobs.`)) return;
+
     overlay.remove();
-    for (const m of data.members) {
-      if (!m.backup_id) continue;
+    let started = 0;
+    for (const m of restorable) {
       try {
-        await api(`/api/backups/${m.backup_id}/restore`, { method: "POST", body: JSON.stringify({ start: true }) });
+        const newName = prefix ? `${prefix}${m.container_name}` : null;
+        await api(`/api/backups/${m.backup_id}/restore`, {
+          method: "POST",
+          body: JSON.stringify({ new_name: newName, start }),
+        });
+        started++;
       } catch (e) { toast(`${m.container_name}: ${e.message}`, "error"); }
     }
-    toast(`Wiederherstellung für ${restorableCount} Container gestartet`);
+    if (started) toast(`${started} Wiederherstellungs-Jobs gestartet`);
     pollGlobalJobs();
   });
+
   overlay.querySelector("#close-btn").addEventListener("click", () => overlay.remove());
   document.body.appendChild(overlay);
 }
