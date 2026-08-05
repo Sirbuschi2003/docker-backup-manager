@@ -116,56 +116,102 @@ def _landscape_member_info(
     return names, size
 
 
-def _cleanup_remote_for_record(record: BackupRecord, db: Session) -> list[str]:
-    """Bereinigt alle Remote-Daten für ein einzelnes Backup-Record.
-    Gibt eine Liste von Fehlermeldungen zurück (leer = alles ok)."""
-    errors = []
+import logging as _logging
+_bg_logger = _logging.getLogger("dbm.remote_cleanup")
 
-    # 1. Synced targets: normale Datei-Löschung
+
+def _snapshot_remote_task(record: BackupRecord, db: Session, exclude_id: int = None) -> dict:
+    """Sammelt alle für die Remote-Bereinigung nötigen Daten aus einem BackupRecord.
+    Gibt ein reines Dict zurück (kein ORM nötig im Hintergrund-Thread)."""
+    synced = []
     for target_id in json.loads(record.synced_target_ids or "[]"):
-        target = db.query(StorageTarget).filter(StorageTarget.id == target_id).first()
-        if not target:
-            continue
-        try:
-            storage_sync.delete_from_target(target.type, target.config_json, _relative_key(Path(record.path)))
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"{target.name}: {exc}")
+        t = db.query(StorageTarget).filter(StorageTarget.id == target_id).first()
+        if t:
+            synced.append({"type": t.type, "config_json": t.config_json, "name": t.name})
 
-    # 2. Stream target (nur Container-Backups haben Restic-Repos)
+    stream = None
+    is_last = False
     if record.streamed_target_id is not None and record.backup_type == "container":
-        target = db.query(StorageTarget).filter(StorageTarget.id == record.streamed_target_id).first()
-        if target:
-            stream_target = (target.type, target.config_json, record.streamed_target_id)
+        t = db.query(StorageTarget).filter(StorageTarget.id == record.streamed_target_id).first()
+        if t:
+            stream = {"type": t.type, "config_json": t.config_json, "id": record.streamed_target_id, "name": t.name}
+            q = db.query(BackupRecord).filter(
+                BackupRecord.name == record.name,
+                BackupRecord.streamed_target_id == record.streamed_target_id,
+                BackupRecord.backup_type == "container",
+            )
+            if exclude_id is not None:
+                q = q.filter(BackupRecord.id != exclude_id)
+            is_last = q.count() == 0
+
+    return {
+        "path": record.path,
+        "name": record.name,
+        "backup_type": record.backup_type,
+        "synced": synced,
+        "stream": stream,
+        "is_last": is_last,
+    }
+
+
+def _run_remote_cleanup(task: dict) -> list[str]:
+    """Führt die Remote-Bereinigung für ein vorbereitetes Task-Dict durch.
+    Kein DB-Zugriff — kann im Hintergrund-Thread laufen."""
+    errors = []
+    rec_path = Path(task["path"])
+
+    for t in task["synced"]:
+        try:
+            storage_sync.delete_from_target(t["type"], t["config_json"], _relative_key(rec_path))
+        except Exception as exc:
+            errors.append(f"{t['name']}: {exc}")
+
+    if task["stream"] and task["backup_type"] == "container":
+        t = task["stream"]
+        stream_target = (t["type"], t["config_json"], t["id"])
+        try:
+            restic_engine.maybe_forget_restic(rec_path, stream_target)
+            if task["is_last"]:
+                restic_engine.purge_restic_repo(task["name"], stream_target)
+            meta_path = rec_path / "meta.json"
             try:
-                # Bekannte Snapshots vergessen
-                restic_engine.maybe_forget_restic(Path(record.path), stream_target)
-
-                # Wenn dies der letzte Record für diesen Container auf diesem Ziel ist,
-                # den gesamten Repo-Ordner forciert löschen — auch wenn noch orphaned
-                # Snapshots aus fehlgeschlagenen Backups vorhanden sind.
-                other_count = db.query(BackupRecord).filter(
-                    BackupRecord.name == record.name,
-                    BackupRecord.streamed_target_id == record.streamed_target_id,
-                    BackupRecord.backup_type == "container",
-                    BackupRecord.id != record.id,
-                ).count()
-                if other_count == 0:
-                    restic_engine.purge_restic_repo(record.name, stream_target)
-
-                # Für alte Tar-Stream-Backups (kein restic) normal löschen
-                meta_path = Path(record.path) / "meta.json"
-                try:
-                    _meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
-                except Exception:
-                    _meta = {}
-                if _meta.get("backup_engine") != "restic":
-                    storage_sync.delete_from_target(
-                        target.type, target.config_json, _relative_key(Path(record.path))
-                    )
-            except Exception as exc:  # noqa: BLE001
-                errors.append(f"{target.name}: {exc}")
+                _meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+            except Exception:
+                _meta = {}
+            if _meta.get("backup_engine") != "restic":
+                storage_sync.delete_from_target(t["type"], t["config_json"], _relative_key(rec_path))
+        except Exception as exc:
+            errors.append(f"{t['name']}: {exc}")
 
     return errors
+
+
+def _find_member_records(record: BackupRecord, db: Session) -> list[BackupRecord]:
+    """Gibt alle Mitglieder-BackupRecords einer Landscape zurück."""
+    landscape_dir = Path(record.path)
+    member_jsons = _read_member_jsons(landscape_dir) if landscape_dir.exists() else []
+    if member_jsons:
+        members = []
+        for d in member_jsons:
+            m = db.query(BackupRecord).filter(
+                BackupRecord.path == d.get("backup_path", ""),
+                BackupRecord.name == d.get("container_name", ""),
+            ).first()
+            if m:
+                members.append(m)
+        return members
+    # Fallback: containers_json + created_at match
+    names = json.loads(record.containers_json) if record.containers_json else []
+    result = []
+    for name in names:
+        m = db.query(BackupRecord).filter(
+            BackupRecord.name == name,
+            BackupRecord.backup_type == "container",
+            BackupRecord.created_at == record.created_at,
+        ).first()
+        if m:
+            result.append(m)
+    return result
 
 
 @router.delete("/{backup_id}")
@@ -174,63 +220,36 @@ def delete_backup(backup_id: int, db: Session = Depends(get_db), user: User = De
     if not record:
         raise HTTPException(404, "Backup not found")
 
-    remote_errors = []
-
-    # Landscape-Backups: zuerst alle Mitglieder-Container-Records löschen.
-    # Die Member-Daten (lokale Verzeichnisse + Restic-Repos) sind in den Member-Records,
-    # nicht im Landscape-Record selbst.
+    # 1. Collect remote-cleanup tasks (all DB queries happen HERE, before deletion)
+    all_tasks: list[dict] = []
+    members: list[BackupRecord] = []
     if record.backup_type == "landscape":
-        landscape_dir = Path(record.path)
-        # Primary: read per-member JSON files (written by newer backup runs)
-        member_jsons = _read_member_jsons(landscape_dir) if landscape_dir.exists() else []
-        if member_jsons:
-            for d in member_jsons:
-                member_name = d.get("container_name", "")
-                member_path = d.get("backup_path", "")
-                if not member_path or not member_name:
-                    continue
-                try:
-                    member = (
-                        db.query(BackupRecord)
-                        .filter(BackupRecord.path == member_path, BackupRecord.name == member_name)
-                        .first()
-                    )
-                    if not member:
-                        continue
-                    remote_errors.extend(_cleanup_remote_for_record(member, db))
-                    backup_engine.delete_backup(Path(member.path))
-                    db.delete(member)
-                except Exception as exc:  # noqa: BLE001
-                    remote_errors.append(f"Mitglied {member_name}: {exc}")
-        else:
-            # Fallback: old format without per-member JSON files — use containers_json
-            # and find member records by name + matching created_at timestamp.
-            member_names = json.loads(record.containers_json) if record.containers_json else []
-            for member_name in member_names:
-                try:
-                    member = (
-                        db.query(BackupRecord)
-                        .filter(
-                            BackupRecord.name == member_name,
-                            BackupRecord.backup_type == "container",
-                            BackupRecord.created_at == record.created_at,
-                        )
-                        .first()
-                    )
-                    if not member:
-                        continue
-                    remote_errors.extend(_cleanup_remote_for_record(member, db))
-                    backup_engine.delete_backup(Path(member.path))
-                    db.delete(member)
-                except Exception as exc:  # noqa: BLE001
-                    remote_errors.append(f"Mitglied {member_name}: {exc}")
+        members = _find_member_records(record, db)
+        # Snapshot info for each member, excluding all member IDs from "is_last" check
+        all_member_ids = {m.id for m in members}
+        for m in members:
+            all_tasks.append(_snapshot_remote_task(m, db, exclude_id=m.id))
+    all_tasks.append(_snapshot_remote_task(record, db, exclude_id=record.id))
 
-    remote_errors.extend(_cleanup_remote_for_record(record, db))
+    # 2. Delete local files + DB records immediately
+    for m in members:
+        try:
+            backup_engine.delete_backup(Path(m.path))
+            db.delete(m)
+        except Exception as exc:
+            _bg_logger.warning("Lokale Löschung Mitglied %s fehlgeschlagen: %s", m.name, exc)
     backup_engine.delete_backup(Path(record.path))
     db.delete(record)
     db.commit()
-    if remote_errors:
-        return {"ok": True, "warning": "Lokal gelöscht, Probleme bei Speicherzielen: " + "; ".join(remote_errors)}
+
+    # 3. Remote cleanup in background thread — UI gets immediate response
+    def _bg():
+        for task in all_tasks:
+            errs = _run_remote_cleanup(task)
+            for e in errs:
+                _bg_logger.warning("Remote-Bereinigung '%s': %s", task["name"], e)
+
+    threading.Thread(target=_bg, daemon=True, name=f"remote-cleanup-{backup_id}").start()
     return {"ok": True}
 
 
