@@ -392,23 +392,27 @@ def backup_landscape_now(payload: LandscapeBackupPayload, user: User = Depends(g
 class RestorePayload(BaseModel):
     new_name: Optional[str] = None
     start: bool = True
+    rename_volumes: bool = True
+    volume_base_dir: Optional[str] = None
 
 
 def _run_restore_job(job_id: str, backup_path: str, new_name: Optional[str], start: bool,
-                      stream_target: Optional[tuple]):
+                      stream_target: Optional[tuple], rename_volumes: bool = True,
+                      volume_base_dir: Optional[str] = None):
     label = new_name or Path(backup_path).parent.name
-    event_log.log_event("restore", f"Restore von „{label}“ gestartet")
+    event_log.log_event(“restore”, f”Restore von „{label}” gestartet”)
     try:
         def progress(step, name, total=None):
             job_tracker.update_progress(job_id, step, name, total)
 
         restore_container(Path(backup_path), new_name=new_name, start=start, on_progress=progress,
-                           stream_target=stream_target)
+                           stream_target=stream_target, rename_volumes=rename_volumes,
+                           volume_base_dir=volume_base_dir)
         job_tracker.finish_job(job_id, True)
-        event_log.log_event("restore", f"Restore von „{label}“ erfolgreich abgeschlossen")
+        event_log.log_event(“restore”, f”Restore von „{label}” erfolgreich abgeschlossen”)
     except Exception as exc:  # noqa: BLE001
         job_tracker.finish_job(job_id, False, str(exc))
-        event_log.log_event("restore", f"Restore von „{label}“ fehlgeschlagen: {exc}", level="error")
+        event_log.log_event(“restore”, f”Restore von „{label}” fehlgeschlagen: {exc}”, level=”error”)
 
 
 @router.post("/{backup_id}/restore")
@@ -425,7 +429,8 @@ def restore_backup(backup_id: int, payload: RestorePayload, db: Session = Depend
     job = job_tracker.create_job("restore", record.name, total_steps=1)
     thread = threading.Thread(
         target=_run_restore_job,
-        args=(job.id, record.path, payload.new_name, payload.start, stream_target),
+        args=(job.id, record.path, payload.new_name, payload.start, stream_target,
+              payload.rename_volumes, payload.volume_base_dir),
         daemon=True,
     )
     thread.start()

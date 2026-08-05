@@ -694,12 +694,23 @@ async function backupsPage() {
 function openRestoreModal(version) {
   const overlay = h(`
     <div class="modal-overlay">
-      <div class="modal">
+      <div class="modal" style="width:500px">
         <h3>Backup wiederherstellen</h3>
         <p style="margin-bottom:4px; font-size:14px;">Stand: <strong>${fmtDateLong(version.created_at)}</strong></p>
         <p class="muted" style="margin-bottom:16px; font-size:12px;">Der Container wird auf genau diesen Zeitpunkt zurückgesetzt.</p>
-        <div class="field"><label>Neuer Container-Name (optional, leer = Originalname)</label>
-          <input type="text" id="restore-name" /></div>
+        <div class="field">
+          <label>Neuer Container-Name <span class="muted">(leer = Originalname)</span></label>
+          <input type="text" id="restore-name" placeholder="z.B. immich_server_01_test" />
+        </div>
+        <div class="field">
+          <label><input type="checkbox" id="restore-rename-vols" checked style="width:auto; margin-right:6px;" />
+          Volumes automatisch mit umbenennen <span class="muted">(empfohlen bei neuem Container-Namen)</span></label>
+        </div>
+        <div class="field">
+          <label>Volumes in eigenem Verzeichnis wiederherstellen <span class="muted">(leer = Docker-Standard)</span></label>
+          <input type="text" id="restore-vol-dir" placeholder="z.B. /mnt/ssd2/volumes/" />
+          <p class="muted" style="font-size:11px; margin-top:4px;">Für anderes RAID / andere HDD: Volumes werden als Bind-Mounts in dieses Verzeichnis geschrieben statt als benannte Docker-Volumes.</p>
+        </div>
         <div class="field">
           <label><input type="checkbox" id="restore-start" checked style="width:auto; margin-right:6px;" />Container nach Wiederherstellung starten</label>
         </div>
@@ -711,17 +722,26 @@ function openRestoreModal(version) {
     </div>
   `);
   overlay.querySelector("#cancel-btn").addEventListener("click", () => overlay.remove());
-  overlay.querySelector("#confirm-btn").addEventListener("click", async () => {
+  overlay.querySelector("#confirm-btn").addEventListener("click", async (e) => {
     const newName = overlay.querySelector("#restore-name").value.trim();
+    const renameVolumes = overlay.querySelector("#restore-rename-vols").checked;
+    const volumeBaseDir = overlay.querySelector("#restore-vol-dir").value.trim();
     const start = overlay.querySelector("#restore-start").checked;
+    const btn = e.currentTarget;
+    btn.disabled = true; btn.textContent = "Starte …";
     try {
       await api(`/api/backups/${version.id}/restore`, {
-        method: "POST", body: JSON.stringify({ new_name: newName || null, start }),
+        method: "POST", body: JSON.stringify({
+          new_name: newName || null,
+          rename_volumes: renameVolumes,
+          volume_base_dir: volumeBaseDir || null,
+          start,
+        }),
       });
       toast("Wiederherstellung gestartet");
       pollGlobalJobs();
       overlay.remove();
-    } catch (e) { toast(e.message, "error"); }
+    } catch (e) { toast(e.message, "error"); btn.disabled = false; btn.textContent = "Wiederherstellen"; }
   });
   document.body.appendChild(overlay);
 }

@@ -25,7 +25,8 @@ from app.config import BACKUPS_DIR
 from app.docker_client import get_client
 
 
-def _build_create_kwargs(container_json: dict, new_name: Optional[str], image_ref: str) -> dict:
+def _build_create_kwargs(container_json: dict, new_name: Optional[str], image_ref: str,
+                         volume_name_map: Optional[dict] = None) -> dict:
     config = container_json.get("Config", {})
     host_config = container_json.get("HostConfig", {})
 
@@ -47,7 +48,8 @@ def _build_create_kwargs(container_json: dict, new_name: Optional[str], image_re
     volumes = {}
     for mount in container_json.get("Mounts", []):
         if mount.get("Type") == "volume":
-            volumes[mount["Name"]] = {"bind": mount["Destination"], "mode": "rw" if mount.get("RW", True) else "ro"}
+            src = (volume_name_map or {}).get(mount["Name"], mount["Name"])
+            volumes[src] = {"bind": mount["Destination"], "mode": "rw" if mount.get("RW", True) else "ro"}
         elif mount.get("Type") == "bind":
             volumes[mount["Source"]] = {"bind": mount["Destination"], "mode": "rw" if mount.get("RW", True) else "ro"}
 
@@ -81,18 +83,13 @@ def _build_create_kwargs(container_json: dict, new_name: Optional[str], image_re
 
 def restore_container(backup_dir: Path, new_name: Optional[str] = None, start: bool = True,
                        on_progress: ProgressCallback = _noop_progress,
-                       stream_target: Optional[StreamTarget] = None):
+                       stream_target: Optional[StreamTarget] = None,
+                       rename_volumes: bool = True,
+                       volume_base_dir: Optional[str] = None):
     backup_dir = Path(backup_dir)
-    # Needed to locate streamed volumes on their target below - has to be
-    # computed from the original (possibly encrypted) directory, since a
-    # decrypted copy lives under a throwaway temp path with no such relation.
     relative_key = storage_sync._relative_key(backup_dir)
 
     if not backup_dir.exists():
-        # Either a catalog entry imported from a target (see
-        # list_backups_on_target) that was never local at all, or local files
-        # got lost some other way - pull the whole thing back from the target
-        # first so everything below can work exactly like a normal local backup.
         if not stream_target:
             raise RuntimeError(
                 "Dieses Backup existiert lokal nicht (z. B. nach einem Katalog-Import von einem "
@@ -107,13 +104,15 @@ def restore_container(backup_dir: Path, new_name: Optional[str] = None, start: b
         on_progress(0, "Decrypting backup", 1)
         with encryption.decrypt_directory_to_temp(backup_dir) as tmp_dir:
             return _restore_from_plaintext_dir(Path(tmp_dir), new_name, start, on_progress,
-                                                stream_target, relative_key)
-    return _restore_from_plaintext_dir(backup_dir, new_name, start, on_progress, stream_target, relative_key)
+                                                stream_target, relative_key, rename_volumes, volume_base_dir)
+    return _restore_from_plaintext_dir(backup_dir, new_name, start, on_progress, stream_target, relative_key,
+                                        rename_volumes, volume_base_dir)
 
 
 def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start: bool,
                                  on_progress: ProgressCallback,
-                                 stream_target: Optional[StreamTarget], relative_key: str):
+                                 stream_target: Optional[StreamTarget], relative_key: str,
+                                 rename_volumes: bool = True, volume_base_dir: Optional[str] = None):
     client = get_client()
 
     container_json = json.loads((backup_dir / "container.json").read_text())
@@ -125,6 +124,23 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
     meta = json.loads((backup_dir / "meta.json").read_text()) if (backup_dir / "meta.json").exists() else {}
     streamed_target_id = meta.get("streamed_target_id")
     bind_mounts_meta = meta.get("bind_mounts", [])
+
+    # Build volume name map: original name → restored name (or host path for custom dir).
+    # Used both when restoring data into volumes and when wiring up the container config.
+    original_container_name = meta.get("container_name") or container_json.get("Name", "").lstrip("/")
+    effective_name = new_name or original_container_name
+
+    def _map_vol(vol_name: str) -> str:
+        mapped = vol_name
+        if rename_volumes and new_name and original_container_name and vol_name.startswith(original_container_name):
+            mapped = effective_name + vol_name[len(original_container_name):]
+        if volume_base_dir:
+            return str(Path(volume_base_dir) / mapped)
+        return mapped
+
+    # Pre-build map from all named volumes so _build_create_kwargs can patch the container config.
+    all_named_vols = [m["Name"] for m in container_json.get("Mounts", []) if m.get("Type") == "volume"]
+    volume_name_map = {v: _map_vol(v) for v in all_named_vols}
 
     if streamed_target_id is not None:
         # Volumes/binds were never written locally - each one has to be
@@ -230,14 +246,19 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
 
         for vol_name, vol_file, fmt in all_vol_entries:
             step += 1
-            on_progress(step, f"Restoring volume {vol_name}", total_steps)
-            existing_volumes = {v.name for v in client.volumes.list()}
-            if vol_name not in existing_volumes:
-                client.volumes.create(name=vol_name)
-            if fmt == "tar":
-                restore_volume_from_tar(vol_name, vol_file)
+            mapped = _map_vol(vol_name)
+            on_progress(step, f"Restoring volume {mapped}", total_steps)
+            if volume_base_dir:
+                # Restore into a host directory (bind mount) — Docker creates it automatically
+                Path(mapped).mkdir(parents=True, exist_ok=True)
             else:
-                restore_volume_from_file(vol_name, vol_file)
+                existing_volumes = {v.name for v in client.volumes.list()}
+                if mapped not in existing_volumes:
+                    client.volumes.create(name=mapped)
+            if fmt == "tar":
+                restore_volume_from_tar(mapped, vol_file)
+            else:
+                restore_volume_from_file(mapped, vol_file)
 
         for source, bind_file in all_bind_entries:
             step += 1
@@ -256,7 +277,7 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
 
     step += 1
     on_progress(step, "Creating container", total_steps)
-    create_kwargs = _build_create_kwargs(container_json, new_name, image_ref)
+    create_kwargs = _build_create_kwargs(container_json, new_name, image_ref, volume_name_map)
     container = client.containers.create(**create_kwargs)
 
     for net_name in networks_json.keys():
