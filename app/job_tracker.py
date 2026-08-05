@@ -20,6 +20,9 @@ _upload_byte_samples: dict[str, deque] = {}
 # Per-job log lines: (iso_timestamp, message) tuples, capped at 500 entries.
 _job_logs: dict[str, deque] = {}
 
+# Finished jobs older than this are dropped from list_jobs() and cleaned up.
+FINISHED_JOB_TTL = 10 * 60  # 10 minutes
+
 
 @dataclass
 class Job:
@@ -201,8 +204,11 @@ def get_job(job_id: str) -> Optional[Job]:
 
 
 def list_jobs(active_only: bool = False) -> list[Job]:
+    cutoff = time.time() - FINISHED_JOB_TTL
     with _lock:
         jobs = list(_jobs.values())
+    terminal = {"success", "failed", "cancelled"}
+    jobs = [j for j in jobs if j.status not in terminal or (j.finished_at or 0) >= cutoff]
     if active_only:
         jobs = [j for j in jobs if j.status == "running"]
     jobs.sort(key=lambda j: j.started_at, reverse=True)
@@ -210,13 +216,15 @@ def list_jobs(active_only: bool = False) -> list[Job]:
 
 
 def prune_old_jobs(max_finished: int = 50):
+    cutoff = time.time() - FINISHED_JOB_TTL
     with _lock:
         finished = sorted(
             (j for j in _jobs.values() if j.status != "running"),
             key=lambda j: j.finished_at or 0, reverse=True,
         )
-        for j in finished[max_finished:]:
-            _jobs.pop(j.id, None)
-            _byte_samples.pop(j.id, None)
-            _upload_byte_samples.pop(j.id, None)
-            _job_logs.pop(j.id, None)
+        for i, j in enumerate(finished):
+            if (j.finished_at or 0) < cutoff or i >= max_finished:
+                _jobs.pop(j.id, None)
+                _byte_samples.pop(j.id, None)
+                _upload_byte_samples.pop(j.id, None)
+                _job_logs.pop(j.id, None)
