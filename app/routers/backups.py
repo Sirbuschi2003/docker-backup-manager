@@ -70,8 +70,15 @@ def delete_backup(backup_id: int, db: Session = Depends(get_db), user: User = De
                 restic_engine.maybe_forget_restic(
                     Path(record.path), (target.type, target.config_json, target_id)
                 )
-                # Für Nicht-Restic stream-Backups (altes Tar-Streaming) normal löschen
+                # Für abgebrochene/fehlgeschlagene Backups existiert keine meta.json
+                # (backup_dir wurde bereinigt). Falls das Restic-Repo trotzdem partial
+                # existiert (z.B. init lief durch aber kein Snapshot erzeugt), aufräumen.
                 meta_path = Path(record.path) / "meta.json"
+                if not meta_path.exists() and record.backup_type == "container":
+                    restic_engine.cleanup_restic_repo_for_container(
+                        record.name, (target.type, target.config_json, target_id)
+                    )
+                # Für Nicht-Restic stream-Backups (altes Tar-Streaming) normal löschen
                 if meta_path.exists():
                     try:
                         _meta = json.loads(meta_path.read_text())

@@ -447,6 +447,47 @@ def backup_volume_from_stream(
     )
 
 
+def _delete_repo_folder(repo_url: str, env: dict) -> None:
+    """Löscht den gesamten Restic-Repo-Ordner auf dem Speicherziel.
+    Wird aufgerufen wenn das Repo leer ist (keine Snapshots mehr übrig)."""
+    if repo_url.startswith("rclone:"):
+        # "rclone:remote:path" → rclone erwartet "remote:path"
+        rclone_target = repo_url[len("rclone:"):]
+        result = subprocess.run(
+            ["rclone", "purge", rclone_target],
+            capture_output=True,
+            env={**os.environ, **env},
+            timeout=120,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"rclone purge fehlgeschlagen: {result.stderr.decode(errors='replace').strip()}"
+            )
+        logger.info("Restic-Repo-Ordner gelöscht: %s", rclone_target)
+    elif not repo_url.startswith("s3:"):
+        # Lokaler Pfad
+        import shutil
+        shutil.rmtree(repo_url, ignore_errors=True)
+        logger.info("Lokaler Restic-Repo-Ordner gelöscht: %s", repo_url)
+    # S3: Bucket-Pfad wird über rclone verwaltet — TODO wenn benötigt
+
+
+def _repo_is_empty(repo_url: str, env: dict, password: str) -> bool:
+    """Gibt True zurück wenn das Repo keine Snapshots mehr enthält."""
+    result = subprocess.run(
+        [RESTIC_BIN, "-r", repo_url, "snapshots", "--json", "--no-lock"],
+        capture_output=True,
+        env=_full_env(env, password),
+        timeout=60,
+    )
+    if result.returncode != 0:
+        return False
+    try:
+        return json.loads(result.stdout.decode()) == []
+    except Exception:
+        return False
+
+
 def forget_snapshot(repo_url: str, env: dict, password: str, snapshot_id: str) -> None:
     """Löscht einen Restic-Snapshot und bereinigt nicht mehr referenzierte Daten."""
     result = subprocess.run(
@@ -490,10 +531,40 @@ def dump_snapshot_to_file(
 # Convenience: snapshot cleanup on backup delete
 # ---------------------------------------------------------------------------
 
+def cleanup_restic_repo_for_container(
+    container_name: str, stream_target: tuple
+) -> None:
+    """Prüft ob das Restic-Repo für einen Container leer ist und löscht es ggf.
+    Wird für abgebrochene/fehlgeschlagene Backups ohne meta.json verwendet."""
+    if not container_name or stream_target is None:
+        return
+    target_type, target_config_json, _tid = stream_target
+    target_config = json.loads(target_config_json or "{}")
+    password = get_password()
+    repo_url, env, smb_conf_path = repo_url_and_env(target_type, target_config, container_name)
+    try:
+        if _repo_is_empty(repo_url, env, password):
+            logger.info("Restic-Repo für '%s' leer/nicht initialisiert, lösche Ordner", container_name)
+            try:
+                _delete_repo_folder(repo_url, env)
+            except Exception as exc:
+                logger.warning("Restic-Repo-Ordner konnte nicht gelöscht werden: %s", exc)
+    except Exception as exc:
+        logger.warning("Restic-Repo-Cleanup für '%s' fehlgeschlagen: %s", container_name, exc)
+    finally:
+        if smb_conf_path:
+            try:
+                Path(smb_conf_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
 def maybe_forget_restic(backup_path: Path, stream_target: Optional[tuple]) -> None:
     """
     Liest meta.json und vergisst restic-Snapshots wenn es sich um ein restic-Backup
-    handelt. Best-effort: Fehler werden geloggt aber nicht weitergeworfen.
+    handelt. Nach dem Vergessen wird geprüft ob das Repo leer ist und ggf. der
+    gesamte Ordner auf dem Speicherziel gelöscht. Best-effort: Fehler werden
+    geloggt aber nicht weitergeworfen.
 
     stream_target – (target_type, config_json, target_id) Tupel aus der DB
     """
@@ -511,7 +582,7 @@ def maybe_forget_restic(backup_path: Path, stream_target: Optional[tuple]) -> No
 
     snapshot_ids: dict = meta.get("restic_snapshot_ids", {})
     repo_url: str = meta.get("restic_repo_url", "")
-    if not snapshot_ids or not repo_url:
+    if not repo_url:
         return
 
     target_type, target_config_json, _tid = stream_target
@@ -529,6 +600,13 @@ def maybe_forget_restic(backup_path: Path, stream_target: Optional[tuple]) -> No
                     "Restic forget fehlgeschlagen (snapshot=%s, key=%s): %s",
                     snapshot_id[:8], key, exc,
                 )
+        # Prüfen ob Repo nun leer ist — wenn ja, Ordner komplett löschen
+        try:
+            if _repo_is_empty(repo_url, env, password):
+                logger.info("Restic-Repo leer nach forget, lösche Ordner: %s", repo_url)
+                _delete_repo_folder(repo_url, env)
+        except Exception as exc:
+            logger.warning("Restic-Repo-Ordner-Cleanup fehlgeschlagen: %s", exc)
     finally:
         if smb_conf_path:
             try:

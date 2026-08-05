@@ -152,6 +152,10 @@ def _apply_retention(db, sched: Schedule):
                             Path(r.path), (target.type, target.config_json, target_id)
                         )
                         meta_path = Path(r.path) / "meta.json"
+                        if not meta_path.exists() and r.backup_type == "container":
+                            restic_engine.cleanup_restic_repo_for_container(
+                                r.name, (target.type, target.config_json, target_id)
+                            )
                         try:
                             _meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
                         except Exception:
