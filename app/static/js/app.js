@@ -663,14 +663,17 @@ async function backupsPage() {
       if (restoreBtn) restoreBtn.addEventListener("click", () => openRestoreModal(v));
       const membersBtn = row.querySelector(".members-btn");
       if (membersBtn) membersBtn.addEventListener("click", () => openLandscapeMembersModal(v));
-      row.querySelector(".delete-btn").addEventListener("click", async () => {
+      row.querySelector(".delete-btn").addEventListener("click", async (e) => {
         if (!confirm(`Backup vom ${fmtDate(v.created_at)} für "${name}" wirklich löschen?`)) return;
+        const btn = e.currentTarget;
+        btn.disabled = true;
+        btn.textContent = "Löschen …";
         try {
           const res = await api(`/api/backups/${v.id}`, { method: "DELETE" });
           if (res.warning) toast(res.warning, "error");
           else toast("Backup gelöscht");
           navigate("backups");
-        } catch (e) { toast(e.message, "error"); }
+        } catch (e) { toast(e.message, "error"); btn.disabled = false; btn.textContent = "Löschen"; }
       });
       tbody.appendChild(row);
     });
