@@ -57,11 +57,15 @@ def _run_container_backup_job(job_id: str, container_name: str, storage_target_i
         def on_upload_bytes(n):
             job_tracker.update_upload_bytes(job_id, n)
 
+        def on_log(msg):
+            job_tracker.add_log(job_id, msg)
+
         stream_target = storage_sync.resolve_stream_target(db, stream_volumes_target_id)
         result = backup_engine.backup_container(
             container_name, BACKUPS_DIR, on_progress=progress, stream_target=stream_target,
             should_cancel=lambda: job_tracker.is_cancel_requested(job_id),
             stop_container=stop_container, on_bytes=on_bytes, on_upload_bytes=on_upload_bytes,
+            on_log=on_log,
         )
         record = BackupRecord(
             backup_type="container",

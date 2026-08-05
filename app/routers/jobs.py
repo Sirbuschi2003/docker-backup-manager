@@ -20,6 +20,14 @@ def get_job(job_id: str, user: User = Depends(get_current_user)):
     return job.to_dict()
 
 
+@router.get("/{job_id}/logs")
+def get_job_logs(job_id: str, user: User = Depends(get_current_user)):
+    job = job_tracker.get_job(job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    return {"lines": job_tracker.get_logs(job_id)}
+
+
 @router.post("/{job_id}/cancel")
 def cancel_job(job_id: str, user: User = Depends(get_current_user)):
     job = job_tracker.get_job(job_id)

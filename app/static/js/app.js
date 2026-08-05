@@ -39,6 +39,9 @@ function fmtDuration(sec) {
   const m = Math.floor(sec / 60), s = Math.round(sec % 60);
   return `${m}m ${s}s`;
 }
+function escHtml(s) {
+  return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
 function fmtSpeed(bytesPerSec) {
   if (bytesPerSec == null) return null;
   return `${fmtBytes(bytesPerSec)}/s`;
@@ -102,11 +105,47 @@ function renderJobCard(job) {
         </div>
       </div>
       ${job.error ? `<div class="error-msg">${job.error}</div>` : ""}
+      <div class="job-log-wrap" style="margin-top:6px;">
+        <button type="button" class="btn job-log-toggle" style="padding:2px 8px;font-size:.75rem;opacity:.7;">📋 Log</button>
+        <div class="job-log-panel" style="display:none;margin-top:6px;background:var(--bg2,#1e1e1e);border-radius:4px;padding:8px;max-height:200px;overflow-y:auto;font-family:monospace;font-size:.75rem;line-height:1.5;"></div>
+      </div>
       ${job.cancellable ? `<div class="row-actions" style="margin-top:8px;"><button type="button" class="btn danger job-cancel-btn" style="padding:4px 10px; font-size:.8rem;">Abbrechen</button></div>` : ""}
     </div>
   `);
   _wireJobCancelButton(card, job.id);
+  _wireJobLogToggle(card, job.id);
   return card;
+}
+
+function _wireJobLogToggle(card, jobId) {
+  const btn = card.querySelector(".job-log-toggle");
+  const panel = card.querySelector(".job-log-panel");
+  if (!btn || !panel) return;
+  let pollTimer = null;
+
+  async function refreshLog() {
+    try {
+      const data = await api(`/api/jobs/${jobId}/logs`);
+      if (!data.lines.length) return;
+      const atBottom = panel.scrollHeight - panel.scrollTop <= panel.clientHeight + 20;
+      panel.innerHTML = data.lines.map(l =>
+        `<div><span style="opacity:.5">${l.ts}</span> ${escHtml(l.msg)}</div>`
+      ).join("");
+      if (atBottom) panel.scrollTop = panel.scrollHeight;
+    } catch (_) {}
+  }
+
+  btn.addEventListener("click", () => {
+    const open = panel.style.display !== "none";
+    panel.style.display = open ? "none" : "block";
+    btn.style.opacity = open ? ".7" : "1";
+    if (!open) {
+      refreshLog();
+      pollTimer = setInterval(refreshLog, 2000);
+    } else {
+      clearInterval(pollTimer);
+    }
+  });
 }
 
 function _wireJobCancelButton(card, jobId) {

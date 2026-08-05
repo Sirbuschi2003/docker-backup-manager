@@ -45,6 +45,8 @@ ShouldCancel = Callable[[], bool]
 # Called with the number of new bytes read/written (not cumulative) so the
 # job tracker can derive a live transfer speed - see job_tracker.update_bytes.
 BytesCallback = Optional[Callable[[int], None]]
+# Called with a human-readable message for the live log panel in the UI.
+LogCallback = Optional[Callable[[str], None]]
 
 
 def _noop_progress(step: int, name: str, total: Optional[int] = None) -> None:
@@ -96,6 +98,14 @@ class BackupResult:
 
 def _timestamp() -> str:
     return datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+
+
+def fmtbytes(n: int) -> str:
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024:
+            return f"{n:.1f} {unit}" if unit != "B" else f"{n} B"
+        n /= 1024
+    return f"{n:.1f} PB"
 
 
 def dir_size_bytes(path: Path) -> int:
@@ -283,7 +293,12 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
                       should_cancel: ShouldCancel = _never_cancel,
                       stop_container: bool = False,
                       on_bytes: BytesCallback = None,
-                      on_upload_bytes: BytesCallback = None) -> BackupResult:
+                      on_upload_bytes: BytesCallback = None,
+                      on_log: LogCallback = None) -> BackupResult:
+    def _log(msg: str) -> None:
+        if on_log:
+            on_log(msg)
+
     client = get_client()
     container = client.containers.get(container_id_or_name)
     attrs = container.attrs
@@ -322,9 +337,13 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
             restic_repo_url, restic_env, restic_smb_conf = restic_engine.repo_url_and_env(
                 target_type_r, target_config_r, name
             )
-            restic_engine.init_repo_if_needed(restic_repo_url, restic_env, restic_password)
+            _log(f"Restic-Repo prüfen: {restic_repo_url}")
+            restic_engine.init_repo_if_needed(restic_repo_url, restic_env, restic_password,
+                                               on_log=on_log)
+            _log("Restic-Repo bereit")
         except Exception as exc:  # noqa: BLE001
             logger.error("Restic-Init fehlgeschlagen, falle zurück auf Tar-Stream: %s", exc)
+            _log(f"FEHLER Restic-Init: {exc} — falle zurück auf Tar-Stream")
             use_restic = False
             if restic_smb_conf:
                 try:
@@ -339,6 +358,7 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
 
         step = 1
         on_progress(step, f"Reading configuration for {name}", total_steps)
+        _log(f"Lese Konfiguration für {name}")
         (backup_dir / "container.json").write_text(json.dumps(attrs, indent=2, default=str))
 
         network_settings = attrs.get("NetworkSettings", {}).get("Networks", {})
@@ -355,9 +375,8 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
 
         step += 1
         on_progress(step, f"Saving image for {name}", total_steps)
-        image_tag = None
-        if attrs.get("Config", {}).get("Image"):
-            image_tag = attrs["Config"]["Image"]
+        image_tag = attrs.get("Config", {}).get("Image")
+        _log(f"Speichere Image: {image_tag or 'unbekannt'}")
         image_tar = backup_dir / "image.tar"
         with open(image_tar, "wb") as f:
             for chunk in container.image.save(named=True):
@@ -365,13 +384,16 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
                 if on_bytes:
                     on_bytes(len(chunk))
                 f.write(chunk)
+        _log(f"Image gespeichert ({fmtbytes(image_tar.stat().st_size)})")
 
         if should_stop:
             step += 1
             _check_cancel(should_cancel, f"before stopping {name}")
             on_progress(step, f"Stopping {name} for a consistent backup", total_steps)
+            _log(f"Container {name} wird gestoppt")
             container.stop()
             container_stopped = True
+            _log(f"Container {name} gestoppt")
 
         volumes_dir = backup_dir / "volumes"
         volume_names = []
@@ -385,13 +407,15 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
             if use_restic:
                 on_progress(step, f"Restic: Sicherung Volume {vol_name}", total_steps)
                 tag = f"{sanitize_name(name)}/{sanitize_name(vol_name)}"
+                _log(f"Starte restic backup für Volume '{vol_name}' (tag={tag})")
                 snapshot_id = restic_engine.backup_volume_from_stream(
                     iter_volume_tar_chunks(vol_name, should_cancel=should_cancel, compress=False),
                     restic_repo_url, restic_env, restic_password, tag,
                     on_bytes=on_bytes, should_cancel=should_cancel,
-                    on_upload_bytes=on_upload_bytes,
+                    on_upload_bytes=on_upload_bytes, on_log=on_log,
                 )
                 restic_snapshot_ids[vol_name] = snapshot_id
+                _log(f"Snapshot {snapshot_id[:8]} für '{vol_name}' erstellt")
             elif stream_target:
                 target_type, target_config_json, _target_id = stream_target
                 on_progress(step, f"Streaming volume {vol_name} to storage target", total_steps)
@@ -420,13 +444,15 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
                 on_progress(step, f"Restic: Sicherung Bind-Mount {destination}", total_steps)
                 bind_key = sanitize_name(destination)
                 tag = f"{sanitize_name(name)}/bind_{bind_key}"
+                _log(f"Starte restic backup für Bind-Mount '{destination}'")
                 snapshot_id = restic_engine.backup_volume_from_stream(
                     iter_volume_tar_chunks(source, should_cancel=should_cancel, compress=False),
                     restic_repo_url, restic_env, restic_password, tag,
                     on_bytes=on_bytes, should_cancel=should_cancel,
-                    on_upload_bytes=on_upload_bytes,
+                    on_upload_bytes=on_upload_bytes, on_log=on_log,
                 )
                 restic_snapshot_ids[f"bind_{bind_key}"] = snapshot_id
+                _log(f"Snapshot {snapshot_id[:8]} für Bind-Mount '{destination}' erstellt")
             elif stream_target:
                 target_type, target_config_json, _target_id = stream_target
                 on_progress(step, f"Streaming bind mount {destination} to storage target", total_steps)
@@ -441,8 +467,10 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
         if container_stopped:
             step += 1
             on_progress(step, f"Starting {name} again", total_steps)
+            _log(f"Container {name} wird wieder gestartet")
             container.start()
             container_stopped = False
+            _log(f"Container {name} läuft wieder")
 
         step += 1
         on_progress(step, "Finalizing", total_steps)
@@ -473,9 +501,11 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
             encryption.encrypt_directory_in_place(backup_dir, on_progress=encrypt_progress)
 
         size = dir_size_bytes(backup_dir)
+        _log(f"Backup abgeschlossen ({fmtbytes(size)} lokal)")
         return BackupResult(ok=True, name=name, path=backup_dir, size_bytes=size, containers=[name],
                              streamed_target_id=stream_target[2] if stream_target else None)
     except BackupCancelled as exc:
+        _log(f"Backup abgebrochen: {exc}")
         shutil.rmtree(backup_dir, ignore_errors=True)
         return BackupResult(ok=False, name=name, path=backup_dir, error=str(exc), cancelled=True)
     except Exception as exc:  # noqa: BLE001
@@ -528,7 +558,8 @@ def backup_landscape(dest_root: Path = BACKUPS_DIR, project_filter: Optional[str
                       should_cancel: ShouldCancel = _never_cancel,
                       stop_containers: bool = False,
                       on_bytes: BytesCallback = None,
-                      on_upload_bytes: BytesCallback = None) -> BackupResult:
+                      on_upload_bytes: BytesCallback = None,
+                      on_log: LogCallback = None) -> BackupResult:
     containers = list_landscape_containers(project_filter, name_contains)
     ts = _timestamp()
     landscape_name = label or project_filter or name_contains or "landscape"
@@ -547,7 +578,7 @@ def backup_landscape(dest_root: Path = BACKUPS_DIR, project_filter: Optional[str
         on_progress(idx, f"Backing up {c.name} ({idx}/{total})", total)
         result = backup_container(c.name, dest_root, stream_target=stream_target, should_cancel=should_cancel,
                                    stop_container=stop_containers, on_bytes=on_bytes,
-                                   on_upload_bytes=on_upload_bytes)
+                                   on_upload_bytes=on_upload_bytes, on_log=on_log)
         member_names.append(result.name)
         member_results.append(result)
         if result.cancelled:

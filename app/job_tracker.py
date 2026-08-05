@@ -17,6 +17,8 @@ _jobs: dict[str, "Job"] = {}
 # (timestamp, cumulative bytes) samples per job, trimmed to last ~10s.
 _byte_samples: dict[str, deque] = {}
 _upload_byte_samples: dict[str, deque] = {}
+# Per-job log lines: (iso_timestamp, message) tuples, capped at 500 entries.
+_job_logs: dict[str, deque] = {}
 
 
 @dataclass
@@ -116,6 +118,23 @@ def update_bytes(job_id: str, delta: int):
         _record_sample(_byte_samples, job_id, job.bytes_done)
 
 
+def add_log(job_id: str, message: str) -> None:
+    """Appends a timestamped log line to the job's in-memory log buffer."""
+    import datetime
+    ts = datetime.datetime.utcnow().strftime("%H:%M:%S")
+    with _lock:
+        if job_id not in _jobs:
+            return
+        buf = _job_logs.setdefault(job_id, deque(maxlen=500))
+        buf.append((ts, message))
+
+
+def get_logs(job_id: str) -> list[dict]:
+    with _lock:
+        buf = _job_logs.get(job_id)
+        return [{"ts": ts, "msg": msg} for ts, msg in buf] if buf else []
+
+
 def update_upload_bytes(job_id: str, delta: int):
     """Adds delta to the job's cumulative upload bytes and records a timestamped
     sample for live upload-speed (Übertragungsrate) computation."""
@@ -194,3 +213,4 @@ def prune_old_jobs(max_finished: int = 50):
             _jobs.pop(j.id, None)
             _byte_samples.pop(j.id, None)
             _upload_byte_samples.pop(j.id, None)
+            _job_logs.pop(j.id, None)

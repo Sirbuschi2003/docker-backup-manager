@@ -40,6 +40,14 @@ logger = logging.getLogger("dbm.restic_engine")
 RESTIC_BIN = "restic"
 
 
+def _fmtb(n: int) -> str:
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024:
+            return f"{n:.1f} {unit}" if unit != "B" else f"{n} B"
+        n /= 1024
+    return f"{n:.1f} PB"
+
+
 # ---------------------------------------------------------------------------
 # Availability + password
 # ---------------------------------------------------------------------------
@@ -234,8 +242,14 @@ def _start_upload_monitor(on_upload_bytes: Callable, stop_event: threading.Event
 # Core restic operations
 # ---------------------------------------------------------------------------
 
-def init_repo_if_needed(repo_url: str, env: dict, password: str) -> None:
+def init_repo_if_needed(repo_url: str, env: dict, password: str,
+                         on_log: Optional[Callable] = None) -> None:
     """Initialisiert das Restic-Repo wenn es noch nicht existiert."""
+    def _log(msg):
+        if on_log:
+            on_log(msg)
+
+    _log("Verbinde mit Restic-Repo …")
     result = subprocess.run(
         [RESTIC_BIN, "-r", repo_url, "snapshots", "--json", "--no-lock"],
         capture_output=True,
@@ -243,7 +257,9 @@ def init_repo_if_needed(repo_url: str, env: dict, password: str) -> None:
         timeout=60,
     )
     if result.returncode == 0:
+        _log("Repo vorhanden, verwende vorhandenes Repo (inkrementell)")
         return
+    _log("Repo nicht gefunden, lege neues Repo an …")
     result = subprocess.run(
         [RESTIC_BIN, "-r", repo_url, "init"],
         capture_output=True,
@@ -251,10 +267,11 @@ def init_repo_if_needed(repo_url: str, env: dict, password: str) -> None:
         timeout=120,
     )
     if result.returncode != 0:
-        raise RuntimeError(
-            f"restic init fehlgeschlagen: {result.stderr.decode(errors='replace').strip()}"
-        )
+        err = result.stderr.decode(errors='replace').strip()
+        _log(f"FEHLER restic init: {err}")
+        raise RuntimeError(f"restic init fehlgeschlagen: {err}")
     logger.info("Restic-Repo angelegt: %s", repo_url)
+    _log("Neues Restic-Repo angelegt")
 
 
 # Seconds without any stdout output before the restic process is considered
@@ -272,6 +289,7 @@ def backup_volume_from_stream(
     on_bytes=None,
     should_cancel=None,
     on_upload_bytes: Optional[Callable] = None,
+    on_log: Optional[Callable] = None,
 ) -> str:
     """
     Streamt einen unkomprimierten Tar eines Volumes in ein Restic-Repo.
@@ -281,7 +299,12 @@ def backup_volume_from_stream(
     tag             – wird am Snapshot gespeichert, z. B. "nextcloud/nextcloud_data"
     on_bytes        – Callback für Leserate (bytes aus Docker-Volume gelesen)
     on_upload_bytes – Callback für Uploadrate (bytes tatsächlich übers Netz übertragen)
+    on_log          – Callback für Live-Log-Nachrichten in der UI
     """
+    def _log(msg):
+        if on_log:
+            on_log(msg)
+
     proc = subprocess.Popen(
         [
             RESTIC_BIN, "-r", repo_url,
@@ -295,8 +318,9 @@ def backup_volume_from_stream(
     )
 
     # Read stdout in a background thread so we can (a) collect it while stdin
-    # is being written without deadlocking on a full pipe buffer, and (b) track
-    # the timestamp of the last output for the hang watchdog below.
+    # is being written without deadlocking on a full pipe buffer, (b) track
+    # the timestamp of the last output for the hang watchdog, and (c) forward
+    # restic's JSON status/summary messages to the live log in real-time.
     stdout_lines: list[bytes] = []
     last_output_at: list[float] = [time.monotonic()]
 
@@ -304,6 +328,31 @@ def backup_volume_from_stream(
         for raw_line in proc.stdout:
             stdout_lines.append(raw_line)
             last_output_at[0] = time.monotonic()
+            if on_log:
+                line = raw_line.decode(errors="replace").strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                    mtype = data.get("message_type", "")
+                    if mtype == "status":
+                        elapsed = int(data.get("seconds_elapsed", 0))
+                        pct = data.get("percent_done", 0.0)
+                        if elapsed > 0 and elapsed % 30 == 0:
+                            _log(f"restic läuft … {elapsed}s")
+                    elif mtype == "summary":
+                        added = data.get("data_added_packed", 0)
+                        total = data.get("total_bytes_processed", 0)
+                        sid = data.get("snapshot_id", "")[:8]
+                        _log(
+                            f"restic fertig: Snapshot {sid} — "
+                            f"gelesen {_fmtb(total)}, neu auf NAS {_fmtb(added)}"
+                        )
+                    elif mtype == "error":
+                        _log(f"restic FEHLER: {data.get('error', line)}")
+                except json.JSONDecodeError:
+                    if line.startswith("Fatal"):
+                        _log(f"restic: {line}")
 
     stdout_thread = threading.Thread(target=_read_stdout, daemon=True)
     stdout_thread.start()
@@ -350,11 +399,17 @@ def backup_volume_from_stream(
         except subprocess.TimeoutExpired:
             idle = time.monotonic() - last_output_at[0]
             if idle > _RESTIC_HANG_TIMEOUT:
+                _log(
+                    f"⚠️ restic hängt seit {int(idle // 60)} Min ohne Ausgabe — "
+                    "Prozess wird abgebrochen (SMB-Verbindung unterbrochen?)"
+                )
                 proc.kill()
                 raise RuntimeError(
                     f"restic backup hängt: kein Fortschritt seit {int(idle // 60)} Minuten — "
                     "Prozess abgebrochen. Mögliche Ursache: SMB-Verbindung zum NAS unterbrochen."
                 )
+            if idle > 60:
+                _log(f"restic schreibt auf NAS … (letzte Aktivität vor {int(idle)}s)")
             logger.debug("restic läuft noch, letzte Ausgabe vor %.0fs", idle)
 
     stdout_thread.join(timeout=5)
