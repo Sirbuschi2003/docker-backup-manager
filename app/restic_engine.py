@@ -324,6 +324,8 @@ def backup_volume_from_stream(
     stdout_lines: list[bytes] = []
     last_output_at: list[float] = [time.monotonic()]
 
+    last_status_bucket: list[int] = [-1]
+
     def _read_stdout():
         for raw_line in proc.stdout:
             stdout_lines.append(raw_line)
@@ -337,8 +339,9 @@ def backup_volume_from_stream(
                     mtype = data.get("message_type", "")
                     if mtype == "status":
                         elapsed = int(data.get("seconds_elapsed", 0))
-                        pct = data.get("percent_done", 0.0)
-                        if elapsed > 0 and elapsed % 30 == 0:
+                        bucket = elapsed // 30
+                        if bucket > 0 and bucket != last_status_bucket[0]:
+                            last_status_bucket[0] = bucket
                             _log(f"restic läuft … {elapsed}s")
                     elif mtype == "summary":
                         added = data.get("data_added_packed", 0)
@@ -411,7 +414,7 @@ def backup_volume_from_stream(
                     f"restic backup hängt: kein Fortschritt seit {int(idle // 60)} Minuten — "
                     "Prozess abgebrochen. Mögliche Ursache: SMB-Verbindung zum NAS unterbrochen."
                 )
-            if idle > 60 and int(idle) % 30 < 5:
+            if idle > 60 and int(idle) % 60 < 5:
                 _log(f"restic schreibt auf NAS … (letzte Aktivität vor {int(idle)}s)")
             logger.debug("restic läuft noch, letzte Ausgabe vor %.0fs", idle)
 
