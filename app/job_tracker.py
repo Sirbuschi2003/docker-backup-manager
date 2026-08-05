@@ -121,7 +121,13 @@ def update_bytes(job_id: str, delta: int):
 def add_log(job_id: str, message: str) -> None:
     """Appends a timestamped log line to the job's in-memory log buffer."""
     import datetime
-    ts = datetime.datetime.utcnow().strftime("%H:%M:%S")
+    import pytz
+    from app.config import TZ_NAME
+    try:
+        tz = pytz.timezone(TZ_NAME)
+        ts = datetime.datetime.now(tz).strftime("%H:%M:%S")
+    except Exception:
+        ts = datetime.datetime.utcnow().strftime("%H:%M:%S")
     with _lock:
         if job_id not in _jobs:
             return
