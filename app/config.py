@@ -1,10 +1,15 @@
+import functools
+import logging
 import os
 import secrets
 from pathlib import Path
+from typing import Optional
 
 APP_VERSION = "1.4.0"
 
 import pytz
+
+logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(os.environ.get("DBM_BASE_DIR", "/data")).resolve()
 BACKUPS_DIR = Path(os.environ.get("DBM_BACKUPS_DIR", str(BASE_DIR / "backups"))).resolve()
@@ -74,3 +79,60 @@ DEFAULT_RETENTION_DAYS = int(os.environ.get("DBM_DEFAULT_RETENTION_DAYS", "0")) 
 
 BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+
+@functools.lru_cache(maxsize=1)
+def _detect_host_base_dir() -> Optional[str]:
+    """Return the host-side path that corresponds to BASE_DIR inside this container.
+
+    When DBM runs inside Docker and spawns helper containers via the Docker socket,
+    volume-mount paths must be HOST paths (as seen by the Docker daemon), not the
+    container-internal paths.  This function resolves that mapping via:
+
+    1. Explicit env var DBM_HOST_DATA_DIR  (fastest, for advanced users)
+    2. Auto-detection: inspect our own container via the Docker socket and find the
+       bind-mount whose Destination matches BASE_DIR.
+    3. Fall back to None  →  caller uses the container path as-is (works when the
+       host and container paths coincidentally match, or when not running in Docker).
+    """
+    explicit = os.environ.get("DBM_HOST_DATA_DIR", "").strip()
+    if explicit:
+        return explicit
+
+    hostname = os.environ.get("HOSTNAME", "").strip()
+    if not hostname:
+        return None
+
+    try:
+        from app.docker_client import get_client  # local import to avoid circular
+        client = get_client()
+        self_container = client.containers.get(hostname)
+        for mount in self_container.attrs.get("Mounts", []):
+            dest = mount.get("Destination", "")
+            if not dest:
+                continue
+            if Path(dest).resolve() == BASE_DIR:
+                src = mount.get("Source", "")
+                if src:
+                    logger.debug("Host-Pfad für %s erkannt: %s", BASE_DIR, src)
+                    return src
+    except Exception as exc:
+        logger.debug("Host-Pfad-Erkennung fehlgeschlagen: %s", exc)
+
+    return None
+
+
+def container_path_to_host(path: Path) -> str:
+    """Translate an in-container path to its host-visible equivalent.
+
+    Required when passing paths as Docker volume sources to containers spawned via
+    the Docker socket — the daemon interprets them as HOST paths, not container paths.
+    """
+    host_base = _detect_host_base_dir()
+    if host_base:
+        try:
+            rel = path.resolve().relative_to(BASE_DIR)
+            return str(Path(host_base) / rel)
+        except ValueError:
+            pass
+    return str(path)

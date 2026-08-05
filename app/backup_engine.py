@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Callable, Iterator, Optional
 
 from app import encryption, restic_engine
-from app.config import BACKUPS_DIR, DOCKER_HELPER_IMAGE
+from app.config import BACKUPS_DIR, DOCKER_HELPER_IMAGE, container_path_to_host
 from app.docker_client import get_client
 
 logger = logging.getLogger("dbm.backup_engine")
@@ -269,7 +269,7 @@ def restore_volume_from_file(volume_name: str, src_tar_gz: Path) -> None:
         command=["tar", "xzf", f"/backup/{src_tar_gz.name}", "-C", "/data"],
         volumes={
             volume_name: {"bind": "/data", "mode": "rw"},
-            str(src_dir): {"bind": "/backup", "mode": "ro"},
+            container_path_to_host(src_dir): {"bind": "/backup", "mode": "ro"},
         },
         remove=True,
     )
@@ -285,7 +285,7 @@ def restore_volume_from_tar(volume_name: str, src_tar: Path) -> None:
         command=["tar", "xf", f"/backup/{src_tar.name}", "-C", "/data"],
         volumes={
             volume_name: {"bind": "/data", "mode": "rw"},
-            str(src_dir): {"bind": "/backup", "mode": "ro"},
+            container_path_to_host(src_dir): {"bind": "/backup", "mode": "ro"},
         },
         remove=True,
     )

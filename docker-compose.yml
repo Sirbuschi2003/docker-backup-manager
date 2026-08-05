@@ -35,6 +35,10 @@ services:
       DBM_GOOGLE_CLIENT_SECRET: "${DBM_GOOGLE_CLIENT_SECRET:-}"
       DBM_MS_CLIENT_ID: "${DBM_MS_CLIENT_ID:-}"
       DBM_MS_CLIENT_SECRET: "${DBM_MS_CLIENT_SECRET:-}"
+      # Only needed if auto-detection of the host path fails (rare). Set this to
+      # the host-side path that is mounted as /data inside the container, e.g.:
+      #   DBM_HOST_DATA_DIR=/home/user/docker-backup-manager/data
+      # DBM_HOST_DATA_DIR: "${DBM_HOST_DATA_DIR:-}"
     volumes:
       # Docker Engine API socket - required to inspect/backup/restore containers.
       - /var/run/docker.sock:/var/run/docker.sock
