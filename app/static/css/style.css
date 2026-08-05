@@ -167,6 +167,8 @@ tr:last-child td { border-bottom: none; }
 .accordion-head { display: flex; justify-content: space-between; align-items: center; padding: 14px 18px; cursor: pointer; }
 .accordion-head:hover { background: var(--bg-elev-2); }
 .accordion-body { border-top: 1px solid var(--border); }
+.accordion-landscape { border-color: var(--accent, #4a9eff); }
+.accordion-landscape .accordion-head { border-left: 3px solid var(--accent, #4a9eff); }
 
 .pill-select { display: flex; gap: 8px; flex-wrap: wrap; }
 .pill { padding: 6px 12px; border-radius: 20px; border: 1px solid var(--border); cursor: pointer; font-size: .82rem; }

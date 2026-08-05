@@ -599,19 +599,29 @@ async function backupsPage() {
   const names = Object.keys(data.groups);
   if (!names.length) {
     groupsEl.appendChild(h(`<div class="empty-state">Noch keine Backups vorhanden</div>`));
+    return wrap;
   }
-  names.forEach((name) => {
-    const versions = data.groups[name];
+
+  // Split into landscapes and standalone containers
+  const landscapeNames = names.filter((n) => data.groups[n].some((v) => v.backup_type === "landscape"));
+  const containerNames = names.filter((n) => !landscapeNames.includes(n));
+
+  function buildAccordion(name, versions, isLandscape) {
     const totalSize = versions.reduce((s, v) => s + (v.size_bytes || 0), 0);
+    const icon = isLandscape ? "🗺️" : "📦";
     const acc = h(`
-      <div class="accordion">
+      <div class="accordion${isLandscape ? " accordion-landscape" : ""}">
         <div class="accordion-head">
-          <div><strong>${name}</strong> <span class="muted">(${versions.length} Version${versions.length === 1 ? "" : "en"}, ${fmtBytes(totalSize)})</span></div>
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span>${icon}</span>
+            <strong>${escHtml(name)}</strong>
+            <span class="muted">(${versions.length} Version${versions.length === 1 ? "" : "en"}, ${fmtBytes(totalSize)})</span>
+          </div>
           <div class="muted">${fmtDate(versions[0].created_at)}</div>
         </div>
         <div class="accordion-body" style="display:none">
           <table>
-            <thead><tr><th>Erstellt</th><th>Typ</th><th>Größe</th><th>Status</th><th></th></tr></thead>
+            <thead><tr><th>Erstellt</th><th>Größe</th><th>Status</th><th></th></tr></thead>
             <tbody></tbody>
           </table>
         </div>
@@ -623,13 +633,15 @@ async function backupsPage() {
 
     const tbody = acc.querySelector("tbody");
     versions.forEach((v) => {
+      const isLsc = v.backup_type === "landscape";
       const row = h(`<tr>
         <td>${fmtDate(v.created_at)}</td>
-        <td>${v.backup_type === "landscape" ? "Landschaft" : "Container"}</td>
         <td>${fmtBytes(v.size_bytes)}</td>
         <td><span class="badge ${v.status === "ok" ? "ok" : "failed"}">${v.status}</span></td>
         <td style="display:flex; gap:8px;">
-          ${v.backup_type === "container" ? '<button class="btn restore-btn">Wiederherstellen</button>' : '<button class="btn members-btn">Mitglieder</button>'}
+          ${isLsc
+            ? '<button class="btn primary members-btn">🗺️ Mitglieder &amp; Restore</button>'
+            : '<button class="btn restore-btn">↩ Wiederherstellen</button>'}
           <button class="btn danger delete-btn">Löschen</button>
         </td>
       </tr>`);
@@ -648,8 +660,17 @@ async function backupsPage() {
       });
       tbody.appendChild(row);
     });
-    groupsEl.appendChild(acc);
-  });
+    return acc;
+  }
+
+  if (landscapeNames.length) {
+    groupsEl.appendChild(h(`<div class="section-title" style="margin-top:0">🗺️ Landscape-Backups (Gruppen)</div>`));
+    landscapeNames.forEach((name) => groupsEl.appendChild(buildAccordion(name, data.groups[name], true)));
+  }
+  if (containerNames.length) {
+    groupsEl.appendChild(h(`<div class="section-title" style="margin-top:${landscapeNames.length ? "24px" : "0"}">📦 Einzelne Container</div>`));
+    containerNames.forEach((name) => groupsEl.appendChild(buildAccordion(name, data.groups[name], false)));
+  }
   return wrap;
 }
 
