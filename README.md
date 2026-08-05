@@ -199,7 +199,6 @@ volumes:
   dbm_data:
 ```
 
-Da das Repository privat ist, ist auch das GHCR-Package standardmäßig privat. Entweder unter **GitHub → Packages → docker-backup-manager → Package settings → Change visibility → Public** stellen, oder in Portainer unter **Registries** eine GHCR-Registry mit einem GitHub Personal Access Token (Scope `read:packages`) hinterlegen.
 
 ---
 
