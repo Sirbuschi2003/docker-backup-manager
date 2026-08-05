@@ -605,15 +605,7 @@ async function backupsPage() {
   // Split into landscapes and standalone containers
   const landscapeNames = names.filter((n) => data.groups[n].some((v) => v.backup_type === "landscape"));
 
-  // Collect all member container names across all landscape versions so we can
-  // hide them from "Einzelne Container" (they're accessible via the landscape group)
-  const landscapeMemberNames = new Set();
-  for (const ln of landscapeNames) {
-    for (const v of data.groups[ln]) {
-      (v.member_names || []).forEach((m) => landscapeMemberNames.add(m));
-    }
-  }
-  const containerNames = names.filter((n) => !landscapeNames.includes(n) && !landscapeMemberNames.has(n));
+  const containerNames = names.filter((n) => !landscapeNames.includes(n));
 
   function buildAccordion(name, versions, isLandscape) {
     // For landscapes, sum the member_size_bytes across versions (the landscape

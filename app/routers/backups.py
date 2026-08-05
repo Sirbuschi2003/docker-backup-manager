@@ -36,6 +36,13 @@ def list_backups(db: Session = Depends(get_db), user: User = Depends(get_current
         records = [r for r in records if r not in stale]
 
     records_by_path = {r.path: r for r in records}
+    # name → latest record per name (for size fallback when path lookup fails)
+    records_latest_by_name: dict[str, BackupRecord] = {}
+    for r in records:
+        if r.backup_type == "container":
+            existing = records_latest_by_name.get(r.name)
+            if existing is None or r.created_at > existing.created_at:
+                records_latest_by_name[r.name] = r
 
     grouped: dict[str, list] = {}
     for r in records:
@@ -49,7 +56,7 @@ def list_backups(db: Session = Depends(get_db), user: User = Depends(get_current
             "containers": json.loads(r.containers_json) if r.containers_json else [],
         }
         if r.backup_type == "landscape":
-            member_names, member_size = _landscape_member_info(r, records_by_path)
+            member_names, member_size = _landscape_member_info(r, records_by_path, records_latest_by_name)
             entry["member_names"] = member_names
             entry["member_size_bytes"] = member_size
         grouped.setdefault(r.name, []).append(entry)
@@ -74,12 +81,12 @@ def _read_member_jsons(landscape_dir: Path) -> list[dict]:
     return result
 
 
-def _landscape_member_info(record: BackupRecord, records_by_path: dict) -> tuple[list[str], int]:
-    """Return (member_names, total_member_size_bytes) for a landscape record.
-
-    Reads per-member JSON files from the landscape dir first. Falls back to
-    containers_json when no member files are found (old backup format or
-    landscape dir does not exist)."""
+def _landscape_member_info(
+    record: BackupRecord,
+    records_by_path: dict,
+    records_latest_by_name: dict | None = None,
+) -> tuple[list[str], int]:
+    """Return (member_names, total_member_size_bytes) for a landscape record."""
     landscape_dir = Path(record.path)
     member_jsons = _read_member_jsons(landscape_dir)
 
@@ -91,13 +98,22 @@ def _landscape_member_info(record: BackupRecord, records_by_path: dict) -> tuple
             if cname:
                 names.append(cname)
             mem_rec = records_by_path.get(bpath)
+            # Path mismatch fallback: use latest record for this container name
+            if mem_rec is None and cname and records_latest_by_name:
+                mem_rec = records_latest_by_name.get(cname)
             if mem_rec:
                 size += mem_rec.size_bytes or 0
         return names, size
 
-    # Fallback: containers_json holds the member name list (no size available)
+    # Fallback for old backup format: containers_json has names, look up sizes by name
     names = json.loads(record.containers_json) if record.containers_json else []
-    return names, 0
+    size = 0
+    if records_latest_by_name:
+        for name in names:
+            mem_rec = records_latest_by_name.get(name)
+            if mem_rec:
+                size += mem_rec.size_bytes or 0
+    return names, size
 
 
 def _cleanup_remote_for_record(record: BackupRecord, db: Session) -> list[str]:
