@@ -29,6 +29,7 @@ import secrets
 import shutil
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Callable, Iterator, Optional
 
@@ -107,6 +108,9 @@ def _write_smb_rclone_conf(config: dict) -> str:
     ]
     if domain:
         lines.append(f"domain = {domain}")
+    # Close idle TCP connections quickly so a stale/dropped SMB connection
+    # doesn't silently block rclone forever.
+    lines.append("idle_timeout = 1m")
     conf_text = "\n".join(lines) + "\n"
     tmp_dir = BASE_DIR / ".tmp"
     tmp_dir.mkdir(exist_ok=True)
@@ -253,6 +257,12 @@ def init_repo_if_needed(repo_url: str, env: dict, password: str) -> None:
     logger.info("Restic-Repo angelegt: %s", repo_url)
 
 
+# Seconds without any stdout output before the restic process is considered
+# hung and gets killed.  30 minutes is conservative enough for large volumes
+# on slow NAS links while still catching a silently stalled SMB connection.
+_RESTIC_HANG_TIMEOUT = 30 * 60
+
+
 def backup_volume_from_stream(
     chunks: Iterator[bytes],
     repo_url: str,
@@ -283,6 +293,20 @@ def backup_volume_from_stream(
         stderr=subprocess.PIPE,
         env=_full_env(env, password),
     )
+
+    # Read stdout in a background thread so we can (a) collect it while stdin
+    # is being written without deadlocking on a full pipe buffer, and (b) track
+    # the timestamp of the last output for the hang watchdog below.
+    stdout_lines: list[bytes] = []
+    last_output_at: list[float] = [time.monotonic()]
+
+    def _read_stdout():
+        for raw_line in proc.stdout:
+            stdout_lines.append(raw_line)
+            last_output_at[0] = time.monotonic()
+
+    stdout_thread = threading.Thread(target=_read_stdout, daemon=True)
+    stdout_thread.start()
 
     stop_monitor = threading.Event()
     monitor_thread = None
@@ -316,17 +340,34 @@ def backup_volume_from_stream(
         if monitor_thread is not None:
             monitor_thread.join(timeout=2)
 
-    stdout = proc.stdout.read()
+    # Wait for restic to finish.  Poll in 60 s intervals so we can detect a
+    # hung process (no stdout output for _RESTIC_HANG_TIMEOUT seconds) and
+    # kill it rather than blocking the backup thread indefinitely.
+    while True:
+        try:
+            proc.wait(timeout=60)
+            break
+        except subprocess.TimeoutExpired:
+            idle = time.monotonic() - last_output_at[0]
+            if idle > _RESTIC_HANG_TIMEOUT:
+                proc.kill()
+                raise RuntimeError(
+                    f"restic backup hängt: kein Fortschritt seit {int(idle // 60)} Minuten — "
+                    "Prozess abgebrochen. Mögliche Ursache: SMB-Verbindung zum NAS unterbrochen."
+                )
+            logger.debug("restic läuft noch, letzte Ausgabe vor %.0fs", idle)
+
+    stdout_thread.join(timeout=5)
     stderr = proc.stderr.read()
-    code = proc.wait()
+    code = proc.returncode
 
     if code != 0:
         raise RuntimeError(
             f"restic backup fehlgeschlagen: {stderr.decode(errors='replace').strip()}"
         )
 
-    for line in stdout.decode(errors="replace").splitlines():
-        line = line.strip()
+    for raw in stdout_lines:
+        line = raw.decode(errors="replace").strip()
         if not line:
             continue
         try:
@@ -341,7 +382,7 @@ def backup_volume_from_stream(
 
     raise RuntimeError(
         "Restic-Snapshot-ID nicht in Ausgabe gefunden: "
-        + stdout.decode(errors="replace")[:500]
+        + b"".join(stdout_lines).decode(errors="replace")[:500]
     )
 
 
