@@ -31,7 +31,12 @@ function fmtBytes(bytes) {
 function fmtDate(iso) {
   if (!iso) return "-";
   const d = new Date(iso);
-  return d.toLocaleString();
+  return d.toLocaleString("de-DE", { dateStyle: "short", timeStyle: "short" });
+}
+function fmtDateLong(iso) {
+  if (!iso) return "-";
+  const d = new Date(iso);
+  return d.toLocaleString("de-DE", { dateStyle: "full", timeStyle: "medium" });
 }
 function fmtDuration(sec) {
   if (sec == null) return "-";
@@ -651,7 +656,8 @@ function openRestoreModal(version) {
     <div class="modal-overlay">
       <div class="modal">
         <h3>Backup wiederherstellen</h3>
-        <p class="muted">Erstellt am ${fmtDate(version.created_at)}</p>
+        <p style="margin-bottom:4px; font-size:14px;">Stand: <strong>${fmtDateLong(version.created_at)}</strong></p>
+        <p class="muted" style="margin-bottom:16px; font-size:12px;">Der Container wird auf genau diesen Zeitpunkt zurückgesetzt.</p>
         <div class="field"><label>Neuer Container-Name (optional, leer = Originalname)</label>
           <input type="text" id="restore-name" /></div>
         <div class="field">
@@ -687,7 +693,8 @@ async function openLandscapeMembersModal(version) {
     <div class="modal-overlay">
       <div class="modal" style="max-width:560px">
         <h3>Gruppe wiederherstellen</h3>
-        <p class="muted" style="margin-bottom:12px;">Backup vom ${fmtDate(version.created_at)} · ${restorableCount} Container</p>
+        <p style="margin-bottom:4px; font-size:14px;">Stand: <strong>${fmtDateLong(version.created_at)}</strong></p>
+        <p class="muted" style="margin-bottom:12px; font-size:12px;">${restorableCount} wiederherstellbare Container</p>
 
         <div id="members-list" style="margin-bottom:16px;"></div>
 

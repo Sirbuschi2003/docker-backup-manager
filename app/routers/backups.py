@@ -49,6 +49,58 @@ def list_backups(db: Session = Depends(get_db), user: User = Depends(get_current
     return {"groups": grouped}
 
 
+def _cleanup_remote_for_record(record: BackupRecord, db: Session) -> list[str]:
+    """Bereinigt alle Remote-Daten für ein einzelnes Backup-Record.
+    Gibt eine Liste von Fehlermeldungen zurück (leer = alles ok)."""
+    errors = []
+
+    # 1. Synced targets: normale Datei-Löschung
+    for target_id in json.loads(record.synced_target_ids or "[]"):
+        target = db.query(StorageTarget).filter(StorageTarget.id == target_id).first()
+        if not target:
+            continue
+        try:
+            storage_sync.delete_from_target(target.type, target.config_json, _relative_key(Path(record.path)))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{target.name}: {exc}")
+
+    # 2. Stream target (nur Container-Backups haben Restic-Repos)
+    if record.streamed_target_id is not None and record.backup_type == "container":
+        target = db.query(StorageTarget).filter(StorageTarget.id == record.streamed_target_id).first()
+        if target:
+            stream_target = (target.type, target.config_json, record.streamed_target_id)
+            try:
+                # Bekannte Snapshots vergessen
+                restic_engine.maybe_forget_restic(Path(record.path), stream_target)
+
+                # Wenn dies der letzte Record für diesen Container auf diesem Ziel ist,
+                # den gesamten Repo-Ordner forciert löschen — auch wenn noch orphaned
+                # Snapshots aus fehlgeschlagenen Backups vorhanden sind.
+                other_count = db.query(BackupRecord).filter(
+                    BackupRecord.name == record.name,
+                    BackupRecord.streamed_target_id == record.streamed_target_id,
+                    BackupRecord.backup_type == "container",
+                    BackupRecord.id != record.id,
+                ).count()
+                if other_count == 0:
+                    restic_engine.purge_restic_repo(record.name, stream_target)
+
+                # Für alte Tar-Stream-Backups (kein restic) normal löschen
+                meta_path = Path(record.path) / "meta.json"
+                try:
+                    _meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+                except Exception:
+                    _meta = {}
+                if _meta.get("backup_engine") != "restic":
+                    storage_sync.delete_from_target(
+                        target.type, target.config_json, _relative_key(Path(record.path))
+                    )
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{target.name}: {exc}")
+
+    return errors
+
+
 @router.delete("/{backup_id}")
 def delete_backup(backup_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     record = db.query(BackupRecord).filter(BackupRecord.id == backup_id).first()
@@ -56,48 +108,37 @@ def delete_backup(backup_id: int, db: Session = Depends(get_db), user: User = De
         raise HTTPException(404, "Backup not found")
 
     remote_errors = []
-    target_ids_to_clean = set(json.loads(record.synced_target_ids or "[]"))
-    if record.streamed_target_id is not None:
-        target_ids_to_clean.add(record.streamed_target_id)
-    for target_id in target_ids_to_clean:
-        target = db.query(StorageTarget).filter(StorageTarget.id == target_id).first()
-        if not target:
-            continue  # target was deleted since - nothing to clean up there
-        try:
-            if target_id == record.streamed_target_id:
-                # Restic-Backups haben keine Dateien auf dem Ziel die per delete_from_target
-                # gelöscht werden könnten – stattdessen Snapshots per restic forget entfernen.
-                restic_engine.maybe_forget_restic(
-                    Path(record.path), (target.type, target.config_json, target_id)
-                )
-                # Für abgebrochene/fehlgeschlagene Backups existiert keine meta.json
-                # (backup_dir wurde bereinigt). Falls das Restic-Repo trotzdem partial
-                # existiert (z.B. init lief durch aber kein Snapshot erzeugt), aufräumen.
-                meta_path = Path(record.path) / "meta.json"
-                if not meta_path.exists() and record.backup_type == "container":
-                    restic_engine.cleanup_restic_repo_for_container(
-                        record.name, (target.type, target.config_json, target_id)
-                    )
-                # Für Nicht-Restic stream-Backups (altes Tar-Streaming) normal löschen
-                if meta_path.exists():
-                    try:
-                        _meta = json.loads(meta_path.read_text())
-                    except Exception:
-                        _meta = {}
-                else:
-                    _meta = {}
-                if _meta.get("backup_engine") != "restic":
-                    storage_sync.delete_from_target(target.type, target.config_json, _relative_key(Path(record.path)))
-            else:
-                storage_sync.delete_from_target(target.type, target.config_json, _relative_key(Path(record.path)))
-        except Exception as exc:  # noqa: BLE001
-            remote_errors.append(f"{target.name}: {exc}")
 
+    # Landscape-Backups: zuerst alle Mitglieder-Container-Records löschen.
+    # Die Member-Daten (lokale Verzeichnisse + Restic-Repos) sind in den Member-Records,
+    # nicht im Landscape-Record selbst.
+    if record.backup_type == "landscape" and Path(record.path).exists():
+        for jf in sorted(Path(record.path).glob("*.json")):
+            try:
+                data = json.loads(jf.read_text())
+                member_name = data.get("container_name", "")
+                member_path = data.get("backup_path", "")
+                if not member_path:
+                    continue
+                member = (
+                    db.query(BackupRecord)
+                    .filter(BackupRecord.path == member_path, BackupRecord.name == member_name)
+                    .first()
+                )
+                if not member:
+                    continue
+                remote_errors.extend(_cleanup_remote_for_record(member, db))
+                backup_engine.delete_backup(Path(member.path))
+                db.delete(member)
+            except Exception as exc:  # noqa: BLE001
+                remote_errors.append(f"Mitglied {jf.stem}: {exc}")
+
+    remote_errors.extend(_cleanup_remote_for_record(record, db))
     backup_engine.delete_backup(Path(record.path))
     db.delete(record)
     db.commit()
     if remote_errors:
-        return {"ok": True, "warning": "Lokal gelöscht, aber nicht überall auf den Speicherzielen: " + "; ".join(remote_errors)}
+        return {"ok": True, "warning": "Lokal gelöscht, Probleme bei Speicherzielen: " + "; ".join(remote_errors)}
     return {"ok": True}
 
 

@@ -559,6 +559,29 @@ def cleanup_restic_repo_for_container(
                 pass
 
 
+def purge_restic_repo(container_name: str, stream_target: tuple) -> None:
+    """Löscht den gesamten Restic-Repo-Ordner für einen Container — auch wenn
+    noch Snapshots darin sind (z.B. orphaned Daten aus fehlgeschlagenen Backups).
+    Nur aufrufen wenn keine weiteren Backup-Records für diesen Container existieren."""
+    if not container_name or stream_target is None:
+        return
+    target_type, target_config_json, _tid = stream_target
+    target_config = json.loads(target_config_json or "{}")
+    repo_url, env, smb_conf_path = repo_url_and_env(target_type, target_config, container_name)
+    try:
+        _delete_repo_folder(repo_url, env)
+        logger.info("Restic-Repo für '%s' vollständig gelöscht", container_name)
+    except Exception as exc:
+        # Nicht vorhanden oder schon gelöscht - kein Problem
+        logger.info("Restic-Repo-Ordner für '%s' nicht vorhanden oder bereits gelöscht: %s", container_name, exc)
+    finally:
+        if smb_conf_path:
+            try:
+                Path(smb_conf_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
 def maybe_forget_restic(backup_path: Path, stream_target: Optional[tuple]) -> None:
     """
     Liest meta.json und vergisst restic-Snapshots wenn es sich um ein restic-Backup

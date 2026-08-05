@@ -123,10 +123,18 @@ def run_schedule(schedule_id: int):
         db.close()
 
 
-def _apply_retention(db, sched: Schedule):
+def _delete_record_for_retention(r: BackupRecord, db) -> None:
+    """Löscht einen einzelnen Backup-Record inklusive lokaler Dateien und Remote-Daten.
+    Wird von _apply_retention aufgerufen — importiert lazy um zirkuläre Imports zu vermeiden."""
     from app.models import StorageTarget
-    from app.storage_sync import _relative_key
+    from app.routers.backups import _cleanup_remote_for_record
 
+    _cleanup_remote_for_record(r, db)
+    backup_engine.delete_backup(r.path)
+    db.delete(r)
+
+
+def _apply_retention(db, sched: Schedule):
     records = db.query(BackupRecord).filter(BackupRecord.name == sched.name).all()
     if sched.target_type == "container" and sched.target_ref:
         records = db.query(BackupRecord).filter(BackupRecord.name == sched.target_ref).all()
@@ -139,35 +147,27 @@ def _apply_retention(db, sched: Schedule):
         if r.id not in prune_ids:
             continue
         try:
-            target_ids_to_clean = set(json.loads(r.synced_target_ids or "[]"))
-            if r.streamed_target_id is not None:
-                target_ids_to_clean.add(r.streamed_target_id)
-            for target_id in target_ids_to_clean:
-                target = db.query(StorageTarget).filter(StorageTarget.id == target_id).first()
-                if not target:
-                    continue
-                try:
-                    if target_id == r.streamed_target_id:
-                        restic_engine.maybe_forget_restic(
-                            Path(r.path), (target.type, target.config_json, target_id)
+            # Landscape-Records: zuerst Member-Container-Records löschen
+            if r.backup_type == "landscape" and Path(r.path).exists():
+                for jf in sorted(Path(r.path).glob("*.json")):
+                    try:
+                        data = json.loads(jf.read_text())
+                        member_name = data.get("container_name", "")
+                        member_path = data.get("backup_path", "")
+                        if not member_path:
+                            continue
+                        member = (
+                            db.query(BackupRecord)
+                            .filter(BackupRecord.path == member_path, BackupRecord.name == member_name)
+                            .first()
                         )
-                        meta_path = Path(r.path) / "meta.json"
-                        if not meta_path.exists() and r.backup_type == "container":
-                            restic_engine.cleanup_restic_repo_for_container(
-                                r.name, (target.type, target.config_json, target_id)
-                            )
-                        try:
-                            _meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
-                        except Exception:
-                            _meta = {}
-                        if _meta.get("backup_engine") != "restic":
-                            storage_sync.delete_from_target(target.type, target.config_json, _relative_key(Path(r.path)))
-                    else:
-                        storage_sync.delete_from_target(target.type, target.config_json, _relative_key(Path(r.path)))
-                except Exception:  # noqa: BLE001
-                    logger.exception("Retention: failed to remove %s from target %s", r.path, target.name)
-            backup_engine.delete_backup(r.path)
-            db.delete(r)
+                        if not member:
+                            continue
+                        _delete_record_for_retention(member, db)
+                    except Exception:  # noqa: BLE001
+                        logger.exception("Retention: Fehler beim Löschen von Landscape-Mitglied %s", jf.stem)
+
+            _delete_record_for_retention(r, db)
             # Commit per record: if a later deletion in this batch fails, already
             # processed ones must not be rolled back or re-attempted next run,
             # since their local files are already gone from disk at this point.
