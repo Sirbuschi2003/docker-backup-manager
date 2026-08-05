@@ -203,6 +203,7 @@ function updateJobCard(card, job) {
 
 function _syncJobCardsInContainer(container, jobs, emptyMessage) {
   if (!jobs.length) {
+    container.querySelectorAll(".job-card").forEach(c => c.remove());
     if (emptyMessage && !container.querySelector(".empty-state")) {
       container.innerHTML = `<div class="empty-state">${emptyMessage}</div>`;
     }
