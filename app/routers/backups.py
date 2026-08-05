@@ -179,26 +179,51 @@ def delete_backup(backup_id: int, db: Session = Depends(get_db), user: User = De
     # Landscape-Backups: zuerst alle Mitglieder-Container-Records löschen.
     # Die Member-Daten (lokale Verzeichnisse + Restic-Repos) sind in den Member-Records,
     # nicht im Landscape-Record selbst.
-    if record.backup_type == "landscape" and Path(record.path).exists():
-        for jf in sorted(Path(record.path).glob("*.json")):
-            try:
-                data = json.loads(jf.read_text())
-                member_name = data.get("container_name", "")
-                member_path = data.get("backup_path", "")
-                if not member_path:
+    if record.backup_type == "landscape":
+        landscape_dir = Path(record.path)
+        # Primary: read per-member JSON files (written by newer backup runs)
+        member_jsons = _read_member_jsons(landscape_dir) if landscape_dir.exists() else []
+        if member_jsons:
+            for d in member_jsons:
+                member_name = d.get("container_name", "")
+                member_path = d.get("backup_path", "")
+                if not member_path or not member_name:
                     continue
-                member = (
-                    db.query(BackupRecord)
-                    .filter(BackupRecord.path == member_path, BackupRecord.name == member_name)
-                    .first()
-                )
-                if not member:
-                    continue
-                remote_errors.extend(_cleanup_remote_for_record(member, db))
-                backup_engine.delete_backup(Path(member.path))
-                db.delete(member)
-            except Exception as exc:  # noqa: BLE001
-                remote_errors.append(f"Mitglied {jf.stem}: {exc}")
+                try:
+                    member = (
+                        db.query(BackupRecord)
+                        .filter(BackupRecord.path == member_path, BackupRecord.name == member_name)
+                        .first()
+                    )
+                    if not member:
+                        continue
+                    remote_errors.extend(_cleanup_remote_for_record(member, db))
+                    backup_engine.delete_backup(Path(member.path))
+                    db.delete(member)
+                except Exception as exc:  # noqa: BLE001
+                    remote_errors.append(f"Mitglied {member_name}: {exc}")
+        else:
+            # Fallback: old format without per-member JSON files — use containers_json
+            # and find member records by name + matching created_at timestamp.
+            member_names = json.loads(record.containers_json) if record.containers_json else []
+            for member_name in member_names:
+                try:
+                    member = (
+                        db.query(BackupRecord)
+                        .filter(
+                            BackupRecord.name == member_name,
+                            BackupRecord.backup_type == "container",
+                            BackupRecord.created_at == record.created_at,
+                        )
+                        .first()
+                    )
+                    if not member:
+                        continue
+                    remote_errors.extend(_cleanup_remote_for_record(member, db))
+                    backup_engine.delete_backup(Path(member.path))
+                    db.delete(member)
+                except Exception as exc:  # noqa: BLE001
+                    remote_errors.append(f"Mitglied {member_name}: {exc}")
 
     remote_errors.extend(_cleanup_remote_for_record(record, db))
     backup_engine.delete_backup(Path(record.path))
