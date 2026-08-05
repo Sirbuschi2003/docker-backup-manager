@@ -49,27 +49,55 @@ def list_backups(db: Session = Depends(get_db), user: User = Depends(get_current
             "containers": json.loads(r.containers_json) if r.containers_json else [],
         }
         if r.backup_type == "landscape":
-            member_names: list[str] = []
-            member_size = 0
-            landscape_dir = Path(r.path)
-            if landscape_dir.exists():
-                for jf in sorted(landscape_dir.glob("*.json")):
-                    try:
-                        d = json.loads(jf.read_text())
-                        cname = d.get("container_name", jf.stem)
-                        bpath = d.get("backup_path", "")
-                        member_names.append(cname)
-                        mem_rec = records_by_path.get(bpath)
-                        if mem_rec:
-                            member_size += mem_rec.size_bytes or 0
-                    except Exception:
-                        pass
-            else:
-                member_names = json.loads(r.containers_json) if r.containers_json else []
+            member_names, member_size = _landscape_member_info(r, records_by_path)
             entry["member_names"] = member_names
             entry["member_size_bytes"] = member_size
         grouped.setdefault(r.name, []).append(entry)
     return {"groups": grouped}
+
+
+def _read_member_jsons(landscape_dir: Path) -> list[dict]:
+    """Return parsed member JSON dicts from a landscape dir, skipping meta.json
+    and any file that lacks a backup_path (= not a real member file)."""
+    result = []
+    if not landscape_dir.exists():
+        return result
+    for jf in sorted(landscape_dir.glob("*.json")):
+        if jf.name == "meta.json":
+            continue
+        try:
+            d = json.loads(jf.read_text())
+            if d.get("backup_path"):
+                result.append(d)
+        except Exception:
+            pass
+    return result
+
+
+def _landscape_member_info(record: BackupRecord, records_by_path: dict) -> tuple[list[str], int]:
+    """Return (member_names, total_member_size_bytes) for a landscape record.
+
+    Reads per-member JSON files from the landscape dir first. Falls back to
+    containers_json when no member files are found (old backup format or
+    landscape dir does not exist)."""
+    landscape_dir = Path(record.path)
+    member_jsons = _read_member_jsons(landscape_dir)
+
+    if member_jsons:
+        names, size = [], 0
+        for d in member_jsons:
+            cname = d.get("container_name", "")
+            bpath = d.get("backup_path", "")
+            if cname:
+                names.append(cname)
+            mem_rec = records_by_path.get(bpath)
+            if mem_rec:
+                size += mem_rec.size_bytes or 0
+        return names, size
+
+    # Fallback: containers_json holds the member name list (no size available)
+    names = json.loads(record.containers_json) if record.containers_json else []
+    return names, 0
 
 
 def _cleanup_remote_for_record(record: BackupRecord, db: Session) -> list[str]:
@@ -322,33 +350,37 @@ def landscape_members(backup_id: int, db: Session = Depends(get_db), user: User 
     if not record or record.backup_type != "landscape":
         raise HTTPException(404, "Landscape backup not found")
 
-    landscape_dir = Path(record.path)
+    member_jsons = _read_member_jsons(Path(record.path))
     result = []
 
-    if landscape_dir.exists():
-        # Use the per-member JSON files written during the backup run.
-        # Each file: {"container_name": "...", "backup_path": "..."}
-        json_files = sorted(landscape_dir.glob("*.json"))
-        for jf in json_files:
-            try:
-                data = json.loads(jf.read_text())
-                container_name = data.get("container_name", jf.stem)
-                backup_path = data.get("backup_path", "")
+    if member_jsons:
+        # New format: per-member JSON files with exact backup_path
+        for d in member_jsons:
+            container_name = d.get("container_name", "")
+            backup_path = d.get("backup_path", "")
+            candidate = (
+                db.query(BackupRecord)
+                .filter(BackupRecord.path == backup_path, BackupRecord.name == container_name)
+                .first()
+            )
+            if not candidate and container_name:
+                # Path mismatch fallback: pick most-recent container record by name
                 candidate = (
                     db.query(BackupRecord)
-                    .filter(BackupRecord.path == backup_path, BackupRecord.name == container_name)
+                    .filter(BackupRecord.name == container_name, BackupRecord.backup_type == "container")
+                    .order_by(BackupRecord.created_at.desc())
                     .first()
                 )
+            if container_name:
                 result.append({
                     "container_name": container_name,
                     "backup_id": candidate.id if candidate else None,
                     "created_at": candidate.created_at.isoformat() + "Z" if candidate else None,
                     "status": candidate.status if candidate else None,
+                    "size_bytes": candidate.size_bytes if candidate else None,
                 })
-            except Exception:
-                pass
     else:
-        # Fallback: containers_json name list, match by latest-in-time
+        # Fallback: containers_json name list (old backup format)
         members = json.loads(record.containers_json) if record.containers_json else []
         for member_name in members:
             candidate = (
@@ -362,6 +394,7 @@ def landscape_members(backup_id: int, db: Session = Depends(get_db), user: User 
                 "backup_id": candidate.id if candidate else None,
                 "created_at": candidate.created_at.isoformat() + "Z" if candidate else None,
                 "status": candidate.status if candidate else None,
+                "size_bytes": candidate.size_bytes if candidate else None,
             })
 
     return {"members": result}
