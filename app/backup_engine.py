@@ -187,9 +187,13 @@ def iter_volume_tar_chunks(volume_name: str, should_cancel: ShouldCancel = _neve
     client = get_client()
     _ensure_helper_image(client)
     tar_flags = "czf" if compress else "cf"
+    # Single-file bind mounts (e.g. /etc/localtime) are mounted at /data as a
+    # FILE, not a directory — "tar -C /data ." would fail. Use a shell conditional
+    # so both cases work: directories get their contents archived, files get
+    # archived directly.
     container = client.containers.create(
         DOCKER_HELPER_IMAGE,
-        command=["tar", tar_flags, "-", "-C", "/data", "."],
+        command=["sh", "-c", f"if [ -d /data ]; then tar {tar_flags} - -C /data .; else tar {tar_flags} - /data; fi"],
         volumes={volume_name: {"bind": "/data", "mode": "ro"}},
         tty=False,
         log_config={"Type": "none"},
@@ -445,14 +449,20 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
                 bind_key = sanitize_name(destination)
                 tag = f"{sanitize_name(name)}/bind_{bind_key}"
                 _log(f"Starte restic backup für Bind-Mount '{destination}'")
-                snapshot_id = restic_engine.backup_volume_from_stream(
-                    iter_volume_tar_chunks(source, should_cancel=should_cancel, compress=False),
-                    restic_repo_url, restic_env, restic_password, tag,
-                    on_bytes=on_bytes, should_cancel=should_cancel,
-                    on_upload_bytes=on_upload_bytes, on_log=on_log,
-                )
-                restic_snapshot_ids[f"bind_{bind_key}"] = snapshot_id
-                _log(f"Snapshot {snapshot_id[:8]} für Bind-Mount '{destination}' erstellt")
+                try:
+                    snapshot_id = restic_engine.backup_volume_from_stream(
+                        iter_volume_tar_chunks(source, should_cancel=should_cancel, compress=False),
+                        restic_repo_url, restic_env, restic_password, tag,
+                        on_bytes=on_bytes, should_cancel=should_cancel,
+                        on_upload_bytes=on_upload_bytes, on_log=on_log,
+                    )
+                    restic_snapshot_ids[f"bind_{bind_key}"] = snapshot_id
+                    _log(f"Snapshot {snapshot_id[:8]} für Bind-Mount '{destination}' erstellt")
+                except BackupCancelled:
+                    raise
+                except Exception as exc:
+                    logger.warning("Bind-Mount '%s' übersprungen: %s", destination, exc)
+                    _log(f"Bind-Mount '{destination}' übersprungen: {exc}")
             elif stream_target:
                 target_type, target_config_json, _target_id = stream_target
                 on_progress(step, f"Streaming bind mount {destination} to storage target", total_steps)
