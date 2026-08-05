@@ -21,6 +21,10 @@ def _add_missing_columns():
                 conn.execute(text("ALTER TABLE users ADD COLUMN failed_attempts INTEGER NOT NULL DEFAULT 0"))
             if "locked_until" not in existing:
                 conn.execute(text("ALTER TABLE users ADD COLUMN locked_until DATETIME"))
+            if "is_admin" not in existing:
+                # Promote existing users to admin so no one loses access on upgrade
+                conn.execute(text("ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT 1"))
+                conn.execute(text("UPDATE users SET is_admin = 1"))
 
         if "schedules" in tables:
             existing = {col["name"] for col in inspector.get_columns("schedules")}

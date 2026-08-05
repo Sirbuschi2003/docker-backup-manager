@@ -2,6 +2,8 @@ import os
 import secrets
 from pathlib import Path
 
+APP_VERSION = "1.4.0"
+
 import pytz
 
 BASE_DIR = Path(os.environ.get("DBM_BASE_DIR", "/data")).resolve()

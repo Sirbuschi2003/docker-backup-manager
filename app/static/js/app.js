@@ -362,7 +362,9 @@ function shell(activeKey, contentEl) {
     nav.appendChild(navEl);
   });
   const userRow = wrap.querySelector("#user-row");
-  userRow.innerHTML = `${state.user ? state.user.username : ""} &middot; <a href="#" id="logout-link">Abmelden</a>`;
+  const adminBadge = state.user && state.user.is_admin ? ' <span class="badge ok" style="font-size:10px; padding:1px 5px;">Admin</span>' : "";
+  userRow.innerHTML = `${state.user ? escHtml(state.user.username) : ""}${adminBadge} &middot; <a href="#" id="logout-link">Abmelden</a>
+    <div style="font-size:10px; color:var(--muted); margin-top:2px; opacity:0.6;">v${state.appVersion || ""}</div>`;
   userRow.querySelector("#logout-link").addEventListener("click", async (e) => {
     e.preventDefault();
     await api("/api/auth/logout", { method: "POST" });
@@ -1100,7 +1102,18 @@ async function settingsPage() {
     api("/api/settings/overview"), api("/api/settings/storage-targets"),
   ]);
   const wrap = h(`<div>
-    <div class="page-header"><h2>Einstellungen</h2></div>
+    <div class="page-header">
+      <h2>Einstellungen</h2>
+      <span class="muted" style="font-size:13px;">Version ${overview.app_version}</span>
+    </div>
+
+    <div class="section-title">Sitzung &amp; Sicherheit</div>
+    <div class="card">
+      <p style="margin:0 0 4px">Sitzungs-Timeout: <strong>${overview.session_max_age_hours} Stunden</strong>
+        <span class="muted">(Umgebungsvariable <span class="mono">DBM_SESSION_MAX_AGE</span> in Sekunden)</span></p>
+      <p class="muted" style="margin:0; font-size:12px;">Nach Ablauf der Sitzung wird automatisch abgemeldet.
+        Standard: 168 Stunden (7 Tage). Für erhöhte Sicherheit z. B. auf 3600 (1 Stunde) setzen.</p>
+    </div>
 
     <div class="section-title">Serverzeit</div>
     <div class="card">
@@ -1138,6 +1151,17 @@ async function settingsPage() {
       </div>
     </div>
 
+    <div id="user-mgmt-section" style="display:none">
+      <div class="section-title">Benutzerverwaltung</div>
+      <div class="card" style="padding:0; margin-bottom:8px;">
+        <table>
+          <thead><tr><th>Benutzername</th><th>Rolle</th><th>Erstellt</th><th>Status</th><th></th></tr></thead>
+          <tbody id="users-tbody"></tbody>
+        </table>
+      </div>
+      <div class="toolbar"><button class="btn primary" id="new-user-btn">Neuen Benutzer anlegen</button></div>
+    </div>
+
     <div class="section-title">Externe Speicherziele (SMB / NFS / S3 / Google Drive / OneDrive / ...)</div>
     <p class="muted" style="margin-top:-4px">Nach jedem Backup wird zusätzlich auf alle aktivierten Ziele hochgeladen/repliziert.</p>
     <div class="toolbar"><button class="btn primary" id="new-target-btn">Neues Ziel</button></div>
@@ -1169,6 +1193,72 @@ async function settingsPage() {
       wrap.querySelector("#cur-pass").value = ""; wrap.querySelector("#new-pass").value = "";
     } catch (e) { toast(e.message, "error"); }
   });
+
+  // User management (admin only)
+  if (state.user && state.user.is_admin) {
+    wrap.querySelector("#user-mgmt-section").style.display = "";
+    async function refreshUsers() {
+      const data = await api("/api/auth/users");
+      const tbody = wrap.querySelector("#users-tbody");
+      tbody.innerHTML = "";
+      data.users.forEach((u) => {
+        const isSelf = u.username === state.user.username;
+        const row = h(`<tr>
+          <td><strong>${escHtml(u.username)}</strong>${isSelf ? ' <span class="muted">(ich)</span>' : ""}</td>
+          <td>${u.is_admin ? '<span class="badge ok">Admin</span>' : '<span class="badge neutral">Nutzer</span>'}</td>
+          <td class="muted">${fmtDate(u.created_at)}</td>
+          <td>${u.locked ? '<span class="badge failed">Gesperrt</span>' : '<span class="badge ok">Aktiv</span>'}</td>
+          <td style="display:flex; gap:6px;">
+            ${u.locked ? `<button class="btn" data-unlock="${u.id}">Entsperren</button>` : ""}
+            ${!isSelf ? `<button class="btn danger" data-del="${u.id}">Löschen</button>` : ""}
+          </td>
+        </tr>`);
+        const unlockBtn = row.querySelector("[data-unlock]");
+        if (unlockBtn) unlockBtn.addEventListener("click", async () => {
+          try { await api(`/api/auth/users/${u.id}/unlock`, { method: "POST" }); toast("Entsperrt"); refreshUsers(); }
+          catch (e) { toast(e.message, "error"); }
+        });
+        const delBtn = row.querySelector("[data-del]");
+        if (delBtn) delBtn.addEventListener("click", async () => {
+          if (!confirm(`Benutzer "${u.username}" wirklich löschen?`)) return;
+          try { await api(`/api/auth/users/${u.id}`, { method: "DELETE" }); toast("Benutzer gelöscht"); refreshUsers(); }
+          catch (e) { toast(e.message, "error"); }
+        });
+        tbody.appendChild(row);
+      });
+    }
+    refreshUsers();
+    wrap.querySelector("#new-user-btn").addEventListener("click", () => {
+      const overlay = h(`
+        <div class="modal-overlay">
+          <div class="modal">
+            <h3>Neuen Benutzer anlegen</h3>
+            <div class="field"><label>Benutzername</label><input type="text" id="nu-name" /></div>
+            <div class="field"><label>Passwort (mind. 8 Zeichen)</label><input type="password" id="nu-pass" /></div>
+            <div class="field">
+              <label><input type="checkbox" id="nu-admin" style="width:auto; margin-right:6px;" />Administrator-Rechte</label>
+            </div>
+            <div class="row-actions">
+              <button class="btn" id="nu-cancel">Abbrechen</button>
+              <button class="btn primary" id="nu-save">Anlegen</button>
+            </div>
+          </div>
+        </div>`);
+      overlay.querySelector("#nu-cancel").addEventListener("click", () => overlay.remove());
+      overlay.querySelector("#nu-save").addEventListener("click", async () => {
+        const username = overlay.querySelector("#nu-name").value.trim();
+        const password = overlay.querySelector("#nu-pass").value;
+        const is_admin = overlay.querySelector("#nu-admin").checked;
+        try {
+          await api("/api/auth/users", { method: "POST", body: JSON.stringify({ username, password, is_admin }) });
+          toast(`Benutzer "${username}" angelegt`);
+          overlay.remove();
+          refreshUsers();
+        } catch (e) { toast(e.message, "error"); }
+      });
+      document.body.appendChild(overlay);
+    });
+  }
 
   const tbody = wrap.querySelector("#targets-tbody");
   const typeLabels = {
@@ -1455,6 +1545,8 @@ async function boot() {
     const me = await api("/api/auth/me").catch(() => null);
     if (!me) { render(loginScreen()); return; }
     state.user = me;
+    // Fetch version once at boot so the sidebar always shows it
+    api("/api/settings/overview").then((o) => { state.appVersion = o.app_version; }).catch(() => {});
     await navigate("dashboard");
     startGlobalJobPoller();
   } catch (e) {

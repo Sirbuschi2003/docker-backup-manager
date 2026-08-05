@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app import encryption, oauth_storage, storage_sync
 from app.auth import get_current_user
-from app.config import BACKUPS_DIR, DEFAULT_RETENTION_COUNT, DEFAULT_RETENTION_DAYS, TZ_ERROR, TZ_NAME
+from app.config import APP_VERSION, BACKUPS_DIR, DEFAULT_RETENTION_COUNT, DEFAULT_RETENTION_DAYS, SESSION_MAX_AGE, TZ_ERROR, TZ_NAME
 from app.database import get_db
 from app.docker_client import is_available
 from app.models import BackupRecord, StorageTarget, User
@@ -27,6 +27,7 @@ def overview(user: User = Depends(get_current_user)):
         total_size = sum(f.stat().st_size for f in BACKUPS_DIR.rglob("*") if f.is_file())
     server_now = datetime.datetime.now(pytz.timezone(TZ_NAME))
     return {
+        "app_version": APP_VERSION,
         "backups_dir": str(BACKUPS_DIR),
         "backups_total_bytes": total_size,
         "docker_available": docker_ok,
@@ -38,6 +39,7 @@ def overview(user: User = Depends(get_current_user)):
         "server_time": server_now.isoformat(),
         "timezone": TZ_NAME,
         "timezone_error": TZ_ERROR,
+        "session_max_age_hours": round(SESSION_MAX_AGE / 3600, 1),
     }
 
 
