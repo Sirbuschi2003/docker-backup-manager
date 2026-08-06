@@ -307,7 +307,7 @@ def _run_landscape_job(job_id: str, label: Optional[str], project_filter: Option
     db = SessionLocal()
     try:
         landscape_label = label or "Gesamte Landschaft"
-        event_log.log_event("backup", f"Landschafts-Backup "{landscape_label}" gestartet")
+        event_log.log_event("backup", f'Landschafts-Backup "{landscape_label}" gestartet')
 
         def progress(step, name, total=None):
             job_tracker.update_progress(job_id, step, name, total)
@@ -368,17 +368,17 @@ def _run_landscape_job(job_id: str, label: Optional[str], project_filter: Option
 
         if result.cancelled:
             job_tracker.cancel_job(job_id)
-            event_log.log_event("backup", f"Landschafts-Backup "{landscape_label}" abgebrochen", level="error")
+            event_log.log_event("backup", f'Landschafts-Backup "{landscape_label}" abgebrochen', level="error")
         else:
             job_tracker.finish_job(job_id, result.ok, result.error, record.id)
             if result.ok:
-                event_log.log_event("backup", f"Landschafts-Backup "{landscape_label}" erfolgreich abgeschlossen")
+                event_log.log_event("backup", f'Landschafts-Backup "{landscape_label}" erfolgreich abgeschlossen')
             else:
-                event_log.log_event("backup", f"Landschafts-Backup "{landscape_label}" fehlgeschlagen: {result.error}",
+                event_log.log_event("backup", f'Landschafts-Backup "{landscape_label}" fehlgeschlagen: {result.error}',
                                      level="error")
     except Exception as exc:  # noqa: BLE001
         job_tracker.finish_job(job_id, False, str(exc))
-        event_log.log_event("backup", f"Landschafts-Backup "{landscape_label}" fehlgeschlagen: {exc}", level="error")
+        event_log.log_event("backup", f'Landschafts-Backup "{landscape_label}" fehlgeschlagen: {exc}', level="error")
     finally:
         db.close()
 
@@ -407,7 +407,7 @@ def _run_restore_job(job_id: str, backup_path: str, new_name: Optional[str], sta
                       stream_target: Optional[tuple], rename_volumes: bool = True,
                       volume_base_dir: Optional[str] = None):
     label = new_name or Path(backup_path).parent.name
-    event_log.log_event("restore”, f”Restore von "{label}” gestartet”)
+    event_log.log_event("restore", f"Restore von '{label}' gestartet")
     try:
         def progress(step, name, total=None):
             job_tracker.update_progress(job_id, step, name, total)
@@ -416,10 +416,10 @@ def _run_restore_job(job_id: str, backup_path: str, new_name: Optional[str], sta
                            stream_target=stream_target, rename_volumes=rename_volumes,
                            volume_base_dir=volume_base_dir)
         job_tracker.finish_job(job_id, True)
-        event_log.log_event("restore”, f”Restore von "{label}” erfolgreich abgeschlossen”)
+        event_log.log_event("restore", f"Restore von '{label}' erfolgreich abgeschlossen")
     except Exception as exc:  # noqa: BLE001
         job_tracker.finish_job(job_id, False, str(exc))
-        event_log.log_event("restore”, f”Restore von "{label}” fehlgeschlagen: {exc}”, level=”error”)
+        event_log.log_event("restore", f"Restore von '{label}' fehlgeschlagen: {exc}", level="error")
 
 
 @router.post("/{backup_id}/restore")
