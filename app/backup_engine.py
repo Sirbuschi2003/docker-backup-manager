@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterator, Optional
 
-from app import encryption, restic_engine
+from app import encryption, restic_engine, storage_sync
 from app.config import BACKUPS_DIR, DOCKER_HELPER_IMAGE, container_path_to_host
 from app.docker_client import get_client
 
