@@ -1,5 +1,6 @@
 import json
 import threading
+from datetime import timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -232,15 +233,21 @@ def _find_member_records(record: BackupRecord, db: Session) -> list[BackupRecord
             if m:
                 members.append(m)
         return members
-    # Fallback: containers_json + created_at match
+    # Fallback for old backups without per-member JSON files: use containers_json names.
+    # The landscape record is committed first, then member records are committed right after
+    # in the same background job — so member created_at values are slightly later but
+    # within seconds. We use a 5-minute window to reliably catch them without
+    # risking false matches from a different backup run.
     names = json.loads(record.containers_json) if record.containers_json else []
     result = []
+    window_end = record.created_at + timedelta(minutes=5)
     for name in names:
         m = db.query(BackupRecord).filter(
             BackupRecord.name == name,
             BackupRecord.backup_type == "container",
-            BackupRecord.created_at == record.created_at,
-        ).first()
+            BackupRecord.created_at >= record.created_at,
+            BackupRecord.created_at <= window_end,
+        ).order_by(BackupRecord.created_at).first()
         if m:
             result.append(m)
     return result

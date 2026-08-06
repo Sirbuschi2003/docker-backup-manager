@@ -352,14 +352,20 @@ function shell(activeKey, contentEl) {
         <div class="user-row" id="user-row"></div>
       </div>
       <div class="main" id="main"></div>
+      <nav class="mobile-nav" id="mobile-nav"></nav>
     </div>
   `);
   const nav = wrap.querySelector("#nav");
+  const mobileNav = wrap.querySelector("#mobile-nav");
   NAV_ITEMS.forEach((item) => {
     const navEl = h(`<div class="nav-item ${item.key === activeKey ? "active" : ""}">
       <span>${item.icon}</span><span>${item.label}</span></div>`);
     navEl.addEventListener("click", () => navigate(item.key));
     nav.appendChild(navEl);
+    const mEl = h(`<div class="mobile-nav-item ${item.key === activeKey ? "active" : ""}">
+      <span class="m-icon">${item.icon}</span><span>${item.label}</span></div>`);
+    mEl.addEventListener("click", () => navigate(item.key));
+    mobileNav.appendChild(mEl);
   });
   const userRow = wrap.querySelector("#user-row");
   const adminBadge = state.user && state.user.is_admin ? ' <span class="badge ok" style="font-size:10px; padding:1px 5px;">Admin</span>' : "";
@@ -630,7 +636,10 @@ async function backupsPage() {
             <strong>${escHtml(name)}</strong>
             <span class="muted">(${versions.length} Version${versions.length === 1 ? "" : "en"}, ${fmtBytes(totalSize)})</span>
           </div>
-          <div class="muted">${fmtDate(versions[0].created_at)}</div>
+          <div style="display:flex; align-items:center; gap:10px;">
+            ${isLandscape ? '<button class="btn danger delete-all-btn" style="font-size:.78rem; padding:5px 10px;">Alle löschen</button>' : ''}
+            <div class="muted">${fmtDate(versions[0].created_at)}</div>
+          </div>
         </div>
         <div class="accordion-body" style="display:none">
           <table>
@@ -643,6 +652,27 @@ async function backupsPage() {
     const head = acc.querySelector(".accordion-head");
     const body = acc.querySelector(".accordion-body");
     head.addEventListener("click", () => { body.style.display = body.style.display === "none" ? "block" : "none"; });
+
+    if (isLandscape) {
+      const deleteAllBtn = acc.querySelector(".delete-all-btn");
+      deleteAllBtn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        if (!confirm(`Alle ${versions.length} Backup-Version(en) für "${name}" wirklich löschen?\n\nDies löscht auch alle zugehörigen Container-Backups.`)) return;
+        deleteAllBtn.disabled = true;
+        deleteAllBtn.textContent = "Löschen …";
+        try {
+          for (const v of versions) {
+            await api(`/api/backups/${v.id}`, { method: "DELETE" });
+          }
+          toast(`Alle Backups für "${name}" gelöscht`);
+          navigate("backups");
+        } catch (err) {
+          toast(err.message, "error");
+          deleteAllBtn.disabled = false;
+          deleteAllBtn.textContent = "Alle löschen";
+        }
+      });
+    }
 
     const tbody = acc.querySelector("tbody");
     versions.forEach((v) => {

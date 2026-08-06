@@ -173,3 +173,60 @@ tr:last-child td { border-bottom: none; }
 .pill-select { display: flex; gap: 8px; flex-wrap: wrap; }
 .pill { padding: 6px 12px; border-radius: 20px; border: 1px solid var(--border); cursor: pointer; font-size: .82rem; }
 .pill.selected { background: var(--accent-dim); border-color: var(--accent); color: var(--accent); }
+
+/* ── Mobile nav bar (hidden on desktop) ── */
+.mobile-nav {
+  display: none;
+  position: fixed; bottom: 0; left: 0; right: 0;
+  background: var(--bg-elev); border-top: 1px solid var(--border);
+  z-index: 80; padding-bottom: env(safe-area-inset-bottom, 0);
+}
+.mobile-nav-item {
+  flex: 1; display: flex; flex-direction: column; align-items: center;
+  justify-content: center; padding: 6px 2px; font-size: .6rem;
+  color: var(--text-dim); cursor: pointer; gap: 2px; min-height: 54px;
+}
+.mobile-nav-item .m-icon { font-size: 1.25rem; line-height: 1; }
+.mobile-nav-item.active { color: var(--accent); }
+
+/* ── Responsive breakpoints ── */
+@media (max-width: 640px) {
+  .sidebar { display: none; }
+  .mobile-nav { display: flex; }
+
+  .main {
+    padding: 16px 14px;
+    padding-bottom: calc(54px + env(safe-area-inset-bottom, 0px) + 12px);
+    max-height: none;
+  }
+
+  .grid.cols-4,
+  .grid.cols-3 { grid-template-columns: 1fr; }
+
+  .page-header { flex-wrap: wrap; gap: 8px; }
+  .page-header .actions { flex-wrap: wrap; gap: 6px; }
+  .page-header h2 { font-size: 1.2rem; }
+
+  .auth-card { width: min(360px, 92vw); }
+
+  .job-tray {
+    bottom: calc(54px + env(safe-area-inset-bottom, 0px) + 8px);
+    left: 10px; right: 10px; width: auto; max-width: none;
+  }
+  .toast-stack { top: 10px; right: 10px; left: 10px; }
+  .toast { min-width: unset; font-size: .84rem; }
+
+  .accordion-head { flex-wrap: wrap; gap: 6px; padding: 12px 14px; }
+  .accordion-body { overflow-x: auto; }
+
+  table { font-size: .82rem; }
+  td, th { padding: 7px 9px; }
+
+  .modal { padding: 18px 16px; }
+  .modal .row-actions { flex-wrap: wrap; }
+
+  .toolbar input[type=text] { width: 100%; }
+  .btn { font-size: .84rem; min-height: 36px; }
+
+  .stat-card .value { font-size: 1.35rem; }
+}

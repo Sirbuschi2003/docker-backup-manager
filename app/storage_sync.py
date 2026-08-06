@@ -215,6 +215,13 @@ def _delete_local_path(config: dict, relative_key: str) -> None:
     dest = Path(config["path"]) / relative_key
     if dest.exists():
         shutil.rmtree(dest)
+    # Remove the parent directory if it is now empty (e.g. last backup version deleted)
+    parent = dest.parent
+    try:
+        if parent.exists() and not any(parent.iterdir()):
+            parent.rmdir()
+    except OSError:
+        pass
 
 
 def _delete_s3(config: dict, relative_key: str) -> None:
@@ -246,6 +253,16 @@ def _delete_smb(config: dict, relative_key: str) -> None:
         for filename in filenames:
             smbclient.remove(f"{dirpath}\\{filename}")
         smbclient.rmdir(dirpath)
+    # Remove the parent directory if it is now empty (e.g. last backup version deleted)
+    parts = relative_key.replace("\\", "/").split("/")
+    if len(parts) > 1:
+        parent_key = "/".join(parts[:-1])
+        parent_root = _smb_remote_root(config, parent_key)
+        try:
+            if smbclient.path.exists(parent_root) and not smbclient.listdir(parent_root):
+                smbclient.rmdir(parent_root)
+        except Exception:
+            pass
 
 
 def _delete_rclone(config: dict, relative_key: str) -> None:
@@ -258,6 +275,15 @@ def _delete_rclone(config: dict, relative_key: str) -> None:
     )
     if proc.returncode != 0 and "directory not found" not in (proc.stderr or "").lower():
         raise RuntimeError(f"rclone purge failed: {proc.stderr.strip() or proc.stdout.strip()}")
+    # Remove the parent directory if it is now empty (rclone rmdir is a no-op if non-empty)
+    parts = relative_key.replace("\\", "/").split("/")
+    if len(parts) > 1:
+        parent_key = "/".join(parts[:-1])
+        parent_dest = f"{remote}:{remote_path}/{parent_key}".replace("\\", "/")
+        subprocess.run(
+            ["rclone", "rmdir", parent_dest, "--config", RCLONE_CONFIG_PATH],
+            capture_output=True, text=True, timeout=30,
+        )
 
 
 def _delete_google_drive(config: dict, relative_key: str) -> None:
