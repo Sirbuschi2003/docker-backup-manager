@@ -39,17 +39,40 @@ def _parse_version(tag: str) -> tuple[int, ...]:
 
 
 def _fetch_latest_release() -> dict:
-    """Query GitHub Releases API. Returns a dict with latest tag info."""
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
-    req = urllib.request.Request(url, headers={"User-Agent": f"docker-backup-manager/{APP_VERSION}"})
+    """Query GitHub Releases API, falling back to Tags API if no releases exist."""
+    headers = {"User-Agent": f"docker-backup-manager/{APP_VERSION}"}
+
+    # Try releases first
+    rel_url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+    req = urllib.request.Request(rel_url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read())
+        tag = data.get("tag_name", "")
+        return {
+            "latest_version": tag.lstrip("v"),
+            "tag": tag,
+            "release_url": data.get("html_url", ""),
+            "published_at": data.get("published_at", ""),
+        }
+    except urllib.error.HTTPError as exc:
+        if exc.code != 404:
+            raise
+
+    # No releases — fall back to tags
+    tags_url = f"https://api.github.com/repos/{GITHUB_REPO}/tags"
+    req = urllib.request.Request(tags_url, headers=headers)
     with urllib.request.urlopen(req, timeout=8) as resp:
-        data = json.loads(resp.read())
-    tag = data.get("tag_name", "")
+        tags = json.loads(resp.read())
+    if not tags:
+        raise ValueError("Keine Releases oder Tags im Repository gefunden.")
+    tag = tags[0].get("name", "")
+    repo_url = f"https://github.com/{GITHUB_REPO}"
     return {
         "latest_version": tag.lstrip("v"),
         "tag": tag,
-        "release_url": data.get("html_url", ""),
-        "published_at": data.get("published_at", ""),
+        "release_url": f"{repo_url}/releases/tag/{tag}" if tag else repo_url,
+        "published_at": "",
     }
 
 

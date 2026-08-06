@@ -382,13 +382,33 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
         image_tag = attrs.get("Config", {}).get("Image")
         _log(f"Speichere Image: {image_tag or 'unbekannt'}")
         image_tar = backup_dir / "image.tar"
-        with open(image_tar, "wb") as f:
-            for chunk in container.image.save(named=True):
-                _check_cancel(should_cancel, "saving image")
-                if on_bytes:
-                    on_bytes(len(chunk))
-                f.write(chunk)
-        _log(f"Image gespeichert ({fmtbytes(image_tar.stat().st_size)})")
+        image_size = 0
+        if stream_target and not use_restic:
+            # Stream image directly to storage target — no local copy needed
+            target_type_s, target_config_json_s, _tid = stream_target
+            relative_image = f"{sanitize_name(name)}/{ts}/image.tar"
+
+            def _image_chunks():
+                nonlocal image_size
+                for chunk in container.image.save(named=True):
+                    _check_cancel(should_cancel, "saving image")
+                    image_size += len(chunk)
+                    if on_bytes:
+                        on_bytes(len(chunk))
+                    yield chunk
+
+            storage_sync.stream_upload_to_target(
+                target_type_s, target_config_json_s, relative_image, _image_chunks()
+            )
+        else:
+            with open(image_tar, "wb") as f:
+                for chunk in container.image.save(named=True):
+                    _check_cancel(should_cancel, "saving image")
+                    if on_bytes:
+                        on_bytes(len(chunk))
+                    f.write(chunk)
+            image_size = image_tar.stat().st_size
+        _log(f"Image gespeichert ({fmtbytes(image_size)})")
 
         if should_stop:
             step += 1
