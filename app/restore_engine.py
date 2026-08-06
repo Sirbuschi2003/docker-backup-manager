@@ -231,7 +231,16 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
         step = 1
 
         on_progress(step, "Loading image", total_steps)
-        with open(backup_dir / "image.tar", "rb") as f:
+        local_image_tar = backup_dir / "image.tar"
+        if not local_image_tar.exists() and streamed_target_id is not None and stream_target:
+            # Image was streamed directly to the storage target — download it first
+            target_type, target_config_json, _target_id = stream_target
+            dl_dest = stage_dir / "image.tar"
+            storage_sync.download_from_target(
+                target_type, target_config_json, f"{relative_key}/image.tar", dl_dest,
+            )
+            local_image_tar = dl_dest
+        with open(local_image_tar, "rb") as f:
             loaded = client.images.load(f.read())
         image_ref = loaded[0].tags[0] if loaded and loaded[0].tags else loaded[0].id
 

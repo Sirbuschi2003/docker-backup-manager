@@ -383,8 +383,10 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
         _log(f"Speichere Image: {image_tag or 'unbekannt'}")
         image_tar = backup_dir / "image.tar"
         image_size = 0
-        if stream_target and not use_restic:
-            # Stream image directly to storage target — no local copy needed
+        if stream_target:
+            # Stream image directly to storage target — no local copy needed.
+            # Applies to both restic and plain-stream modes: restic only handles
+            # volumes/binds, the image is always streamed separately.
             target_type_s, target_config_json_s, _tid = stream_target
             relative_image = f"{sanitize_name(name)}/{ts}/image.tar"
 
