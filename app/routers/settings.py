@@ -1,5 +1,7 @@
 import datetime
 import json
+import threading
+import urllib.request
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -9,12 +11,40 @@ from sqlalchemy.orm import Session
 
 from app import encryption, oauth_storage, storage_sync
 from app.auth import get_current_user
-from app.config import APP_VERSION, BACKUPS_DIR, DEFAULT_RETENTION_COUNT, DEFAULT_RETENTION_DAYS, SESSION_MAX_AGE, TZ_ERROR, TZ_NAME
+from app.config import APP_VERSION, BACKUPS_DIR, DEFAULT_RETENTION_COUNT, DEFAULT_RETENTION_DAYS, GITHUB_REPO, SESSION_MAX_AGE, TZ_ERROR, TZ_NAME
 from app.database import get_db
 from app.docker_client import is_available
 from app.models import BackupRecord, StorageTarget, User
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
+
+# ── Update check cache ──────────────────────────────────────────────────────
+_update_cache: dict = {}
+_update_lock = threading.Lock()
+
+
+def _parse_version(tag: str) -> tuple[int, ...]:
+    """Parse 'v1.4.0' or '1.4.0' into (1, 4, 0) for comparison."""
+    clean = tag.lstrip("v")
+    try:
+        return tuple(int(x) for x in clean.split("."))
+    except ValueError:
+        return (0,)
+
+
+def _fetch_latest_release() -> dict:
+    """Query GitHub Releases API. Returns a dict with latest tag info."""
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+    req = urllib.request.Request(url, headers={"User-Agent": f"docker-backup-manager/{APP_VERSION}"})
+    with urllib.request.urlopen(req, timeout=8) as resp:
+        data = json.loads(resp.read())
+    tag = data.get("tag_name", "")
+    return {
+        "latest_version": tag.lstrip("v"),
+        "tag": tag,
+        "release_url": data.get("html_url", ""),
+        "published_at": data.get("published_at", ""),
+    }
 
 
 @router.get("/overview")
@@ -41,6 +71,45 @@ def overview(user: User = Depends(get_current_user)):
         "timezone_error": TZ_ERROR,
         "session_max_age_hours": round(SESSION_MAX_AGE / 3600, 1),
     }
+
+
+@router.get("/update-check")
+def check_for_update(user: User = Depends(get_current_user)):
+    """Query GitHub Releases API and return version comparison. Cached for 1 hour."""
+    with _update_lock:
+        cached = _update_cache.get("result")
+        fetched_at = _update_cache.get("fetched_at")
+        if cached and fetched_at and (datetime.datetime.utcnow() - fetched_at).total_seconds() < 3600:
+            return cached
+
+    try:
+        release = _fetch_latest_release()
+        current_parts = _parse_version(APP_VERSION)
+        latest_parts = _parse_version(release["latest_version"])
+        result = {
+            "current_version": APP_VERSION,
+            "latest_version": release["latest_version"],
+            "update_available": latest_parts > current_parts,
+            "release_url": release["release_url"],
+            "published_at": release["published_at"],
+            "github_repo": GITHUB_REPO,
+            "error": None,
+        }
+    except Exception as exc:
+        result = {
+            "current_version": APP_VERSION,
+            "latest_version": None,
+            "update_available": False,
+            "release_url": None,
+            "published_at": None,
+            "github_repo": GITHUB_REPO,
+            "error": str(exc),
+        }
+
+    with _update_lock:
+        _update_cache["result"] = result
+        _update_cache["fetched_at"] = datetime.datetime.utcnow()
+    return result
 
 
 class StorageTargetPayload(BaseModel):

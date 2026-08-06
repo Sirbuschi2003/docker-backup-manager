@@ -1195,6 +1195,11 @@ async function settingsPage() {
       <span class="muted" style="font-size:13px;">Version ${overview.app_version}</span>
     </div>
 
+    <div class="section-title">Software-Update</div>
+    <div class="card" id="update-card">
+      <span class="muted" style="font-size:.88rem;">Wird geprüft …</span>
+    </div>
+
     <div class="section-title">Sitzung &amp; Sicherheit</div>
     <div class="card">
       <p style="margin:0 0 4px">Sitzungs-Timeout: <strong>${overview.session_max_age_hours} Stunden</strong>
@@ -1271,6 +1276,48 @@ async function settingsPage() {
   }
   tickClock();
   settingsClockTimer = setInterval(tickClock, 1000);
+
+  // ── Update check (non-blocking) ──────────────────────────────────────────
+  const updateCard = wrap.querySelector("#update-card");
+  api("/api/settings/update-check").then((upd) => {
+    if (upd.error) {
+      updateCard.innerHTML = `<span class="muted" style="font-size:.88rem;">Update-Prüfung fehlgeschlagen: ${escHtml(upd.error)}</span>`;
+      return;
+    }
+    const repoUrl = `https://github.com/${upd.github_repo}`;
+    const updateCmd = `docker compose pull && docker compose up -d --build`;
+    if (upd.update_available) {
+      updateCard.innerHTML = `
+        <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+          <span class="badge running" style="font-size:.82rem; padding:4px 10px;">▲ Update verfügbar</span>
+          <span>Version <strong>${escHtml(upd.latest_version)}</strong> ist verfügbar
+            <span class="muted">(aktuell: ${escHtml(upd.current_version)})</span></span>
+          <a href="${repoUrl}/releases" target="_blank" class="btn" style="font-size:.8rem; padding:5px 10px;">Release-Notes</a>
+        </div>
+        <div style="margin-top:12px; font-size:.85rem; color:var(--text-dim);">
+          Auf dem Docker-Host ausführen:
+        </div>
+        <div style="display:flex; align-items:center; gap:8px; margin-top:6px; flex-wrap:wrap;">
+          <code class="mono" style="background:var(--bg-elev-2); padding:8px 12px; border-radius:8px; border:1px solid var(--border); flex:1; min-width:0; overflow-x:auto; white-space:nowrap;">${updateCmd}</code>
+          <button class="btn" id="copy-update-cmd" style="flex-shrink:0;">Kopieren</button>
+        </div>`;
+      updateCard.querySelector("#copy-update-cmd").addEventListener("click", (e) => {
+        navigator.clipboard.writeText(updateCmd).then(() => {
+          e.target.textContent = "Kopiert ✓";
+          setTimeout(() => { e.target.textContent = "Kopieren"; }, 2000);
+        }).catch(() => toast("Kopieren fehlgeschlagen", "error"));
+      });
+    } else {
+      updateCard.innerHTML = `
+        <div style="display:flex; align-items:center; gap:10px;">
+          <span class="badge ok" style="font-size:.82rem; padding:4px 10px;">✓ Aktuell</span>
+          <span class="muted" style="font-size:.88rem;">Version ${escHtml(upd.current_version)} ist die neueste
+            — <a href="${repoUrl}/releases" target="_blank">GitHub Releases</a></span>
+        </div>`;
+    }
+  }).catch(() => {
+    updateCard.innerHTML = `<span class="muted" style="font-size:.88rem;">Update-Prüfung nicht möglich (kein Internetzugang?).</span>`;
+  });
 
   wrap.querySelector("#change-pass-btn").addEventListener("click", async () => {
     const current_password = wrap.querySelector("#cur-pass").value;
