@@ -29,10 +29,12 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
+COPY docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
 
 ENV DBM_BASE_DIR=/data
 VOLUME ["/data"]
 
 EXPOSE 8420
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8420"]
+CMD ["/docker-entrypoint.sh"]

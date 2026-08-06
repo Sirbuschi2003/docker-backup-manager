@@ -1279,33 +1279,51 @@ async function settingsPage() {
 
   // ── Update check (non-blocking) ──────────────────────────────────────────
   const updateCard = wrap.querySelector("#update-card");
+
+  function showReconnecting(version) {
+    updateCard.innerHTML = `
+      <div style="display:flex; align-items:center; gap:12px;">
+        <span class="badge running" style="font-size:.82rem; padding:4px 10px; animation: pulse 1s infinite;">↻ Update wird eingespielt …</span>
+        <span class="muted" style="font-size:.88rem;">Container startet neu – Seite lädt automatisch neu …</span>
+      </div>`;
+    // Poll until server is back up, then reload
+    const poll = setInterval(async () => {
+      try {
+        await fetch("/api/settings/overview", { credentials: "same-origin" });
+        clearInterval(poll);
+        window.location.reload();
+      } catch (_) { /* still restarting */ }
+    }, 2000);
+  }
+
   api("/api/settings/update-check").then((upd) => {
     if (upd.error) {
       updateCard.innerHTML = `<span class="muted" style="font-size:.88rem;">Update-Prüfung fehlgeschlagen: ${escHtml(upd.error)}</span>`;
       return;
     }
     const repoUrl = `https://github.com/${upd.github_repo}`;
-    const updateCmd = `docker compose pull && docker compose up -d --build`;
     if (upd.update_available) {
       updateCard.innerHTML = `
         <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
           <span class="badge running" style="font-size:.82rem; padding:4px 10px;">▲ Update verfügbar</span>
           <span>Version <strong>${escHtml(upd.latest_version)}</strong> ist verfügbar
             <span class="muted">(aktuell: ${escHtml(upd.current_version)})</span></span>
-          <a href="${repoUrl}/releases" target="_blank" class="btn" style="font-size:.8rem; padding:5px 10px;">Release-Notes</a>
+          <a href="${repoUrl}/releases/tag/${encodeURIComponent(upd.tag || upd.latest_version)}" target="_blank" class="btn" style="font-size:.8rem; padding:5px 10px;">Release-Notes</a>
+          <button class="btn primary" id="do-update-btn" style="padding:5px 14px;">Jetzt installieren</button>
         </div>
-        <div style="margin-top:12px; font-size:.85rem; color:var(--text-dim);">
-          Auf dem Docker-Host ausführen:
-        </div>
-        <div style="display:flex; align-items:center; gap:8px; margin-top:6px; flex-wrap:wrap;">
-          <code class="mono" style="background:var(--bg-elev-2); padding:8px 12px; border-radius:8px; border:1px solid var(--border); flex:1; min-width:0; overflow-x:auto; white-space:nowrap;">${updateCmd}</code>
-          <button class="btn" id="copy-update-cmd" style="flex-shrink:0;">Kopieren</button>
-        </div>`;
-      updateCard.querySelector("#copy-update-cmd").addEventListener("click", (e) => {
-        navigator.clipboard.writeText(updateCmd).then(() => {
-          e.target.textContent = "Kopiert ✓";
-          setTimeout(() => { e.target.textContent = "Kopieren"; }, 2000);
-        }).catch(() => toast("Kopieren fehlgeschlagen", "error"));
+        <div class="muted" style="margin-top:8px; font-size:.8rem;">Der Container lädt das Update von GitHub herunter und startet automatisch neu (~10–20 s).</div>`;
+      updateCard.querySelector("#do-update-btn").addEventListener("click", async (e) => {
+        const btn = e.currentTarget;
+        btn.disabled = true;
+        btn.textContent = "Wird geladen …";
+        try {
+          await api("/api/settings/apply-update", { method: "POST" });
+          showReconnecting(upd.latest_version);
+        } catch (err) {
+          toast(err.message, "error");
+          btn.disabled = false;
+          btn.textContent = "Jetzt installieren";
+        }
       });
     } else {
       updateCard.innerHTML = `

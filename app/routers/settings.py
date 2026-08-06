@@ -1,7 +1,13 @@
 import datetime
 import json
+import os
+import shutil
+import signal
+import tarfile
+import tempfile
 import threading
 import urllib.request
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -93,6 +99,7 @@ def check_for_update(user: User = Depends(get_current_user)):
             "release_url": release["release_url"],
             "published_at": release["published_at"],
             "github_repo": GITHUB_REPO,
+            "tag": release["tag"],
             "error": None,
         }
     except Exception as exc:
@@ -110,6 +117,57 @@ def check_for_update(user: User = Depends(get_current_user)):
         _update_cache["result"] = result
         _update_cache["fetched_at"] = datetime.datetime.utcnow()
     return result
+
+
+@router.post("/apply-update")
+def apply_update(user: User = Depends(get_current_user)):
+    """Download the latest GitHub release, stage it in /data/.app_update/,
+    then restart the container. The entrypoint script applies the staged
+    files before uvicorn starts on the next boot."""
+    upd = check_for_update(user)
+    if upd.get("error"):
+        raise HTTPException(503, f"Update-Prüfung fehlgeschlagen: {upd['error']}")
+    if not upd.get("update_available"):
+        raise HTTPException(400, "Kein Update verfügbar — bereits aktuell.")
+
+    tag = upd["tag"]  # e.g. "v1.4.1"
+    tarball_url = f"https://github.com/{GITHUB_REPO}/archive/refs/tags/{tag}.tar.gz"
+
+    # Download and stage new app/ files in /data/.app_update/
+    # The container entrypoint copies them over /app/app/ on next start.
+    update_stage = BACKUPS_DIR.parent / ".app_update"
+    if update_stage.exists():
+        shutil.rmtree(update_stage)
+    update_stage.mkdir(parents=True)
+
+    try:
+        with urllib.request.urlopen(tarball_url, timeout=120) as resp:
+            with tarfile.open(fileobj=resp, mode="r|gz") as tar:
+                for member in tar:
+                    # Archive root is e.g. "docker-backup-manager-1.4.1/"
+                    parts = member.name.split("/", 1)
+                    if len(parts) < 2:
+                        continue
+                    rel = parts[1]  # strip the root directory prefix
+                    if not (rel.startswith("app/") or rel == "requirements.txt"):
+                        continue
+                    dest = update_stage / rel
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    if member.isfile():
+                        with tar.extractfile(member) as src, open(dest, "wb") as dst:
+                            shutil.copyfileobj(src, dst)
+    except Exception as exc:
+        shutil.rmtree(update_stage, ignore_errors=True)
+        raise HTTPException(500, f"Download fehlgeschlagen: {exc}")
+
+    # Restart after the response is delivered
+    def _restart():
+        import time
+        time.sleep(1)
+        os.kill(1, signal.SIGTERM)
+
+    threading.Thread(target=_restart, daemon=True, name="update-restart").start()
+    return {"ok": True, "version": upd["latest_version"]}
 
 
 class StorageTargetPayload(BaseModel):
