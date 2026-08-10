@@ -208,6 +208,14 @@ def _run_remote_cleanup(task: dict) -> list[str]:
                                 Path(smb_conf_path).unlink(missing_ok=True)
                             except Exception:
                                 pass
+                # Delete the per-backup timestamp directory on the stream target.
+                # This holds image.tar (and nothing else for restic mode) and is
+                # separate from the restic repo folder — it was previously never
+                # removed, leaving image.tar behind on every delete.
+                try:
+                    storage_sync.delete_from_target(t["type"], t["config_json"], _relative_key(rec_path))
+                except Exception as exc:
+                    _bg_logger.debug("Timestamp-Verzeichnis auf Stream-Ziel nicht vorhanden oder bereits gelöscht: %s", exc)
                 if task["is_last"]:
                     restic_engine.purge_restic_repo(task["name"], stream_target)
             else:
