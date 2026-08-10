@@ -227,6 +227,17 @@ def _run_remote_cleanup(task: dict) -> list[str]:
     return errors
 
 
+def _cleanup_remote_for_record(record: BackupRecord, db) -> None:
+    """Bereinigt alle Remote-Daten (Sync-Ziele + Stream-Ziel/Restic) für einen
+    einzelnen BackupRecord. Synchron — wird vom Scheduler-Retention-Thread aufgerufen
+    der bereits im Hintergrund läuft. exclude_id=record.id stellt sicher dass dieser
+    Record selbst nicht in die is_last-Prüfung einfliesst."""
+    task = _snapshot_remote_task(record, db, exclude_id=record.id)
+    errs = _run_remote_cleanup(task)
+    for e in errs:
+        _bg_logger.warning("Remote-Bereinigung Retention '%s': %s", record.name, e)
+
+
 def _find_member_records(record: BackupRecord, db: Session) -> list[BackupRecord]:
     """Gibt alle Mitglieder-BackupRecords einer Landscape zurück."""
     landscape_dir = Path(record.path)
