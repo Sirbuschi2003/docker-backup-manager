@@ -1242,18 +1242,20 @@ async function logsPage() {
     api("/api/logs?limit=2000").catch((e) => { toast(e.message, "error"); return { entries: [], total: 0 }; }),
     api("/api/logs/settings").catch(() => ({ retention_days: 90 })),
   ]);
-  const total = data.total || data.entries.length;
 
-  // Collect categories present in data
   const catsPresent = [...new Set(data.entries.map((e) => e.category))].sort();
   let activeCategory = "all";
   let activeLevel = "all";
+  let liveMode = false;
+  let liveTimer = null;
+  let maxId = data.entries.reduce((m, e) => Math.max(m, e.id), 0);
 
   const wrap = h(`<div>
     <div class="page-header">
       <h2>Logs</h2>
       <div class="actions">
-        <span class="muted" style="font-size:.82rem;" id="log-count">${total} Einträge gesamt</span>
+        <span class="muted" style="font-size:.82rem;" id="log-count">${data.total} Einträge gesamt</span>
+        <button class="btn" id="live-btn" title="Neue Einträge alle 3 s automatisch laden">▶ Live</button>
         <button class="btn" id="log-settings-btn" style="font-size:.82rem;">Aufbewahrung: ${settings.retention_days > 0 ? settings.retention_days + " Tage" : "unbegrenzt"}</button>
         <button class="btn danger" id="log-purge-btn" style="font-size:.82rem;">Jetzt bereinigen</button>
       </div>
@@ -1292,46 +1294,93 @@ async function logsPage() {
   const tbody = wrap.querySelector("#logs-tbody");
   const emptyEl = wrap.querySelector("#log-empty");
   const countEl = wrap.querySelector("#log-count");
+  const liveBtn = wrap.querySelector("#live-btn");
+  const catBar  = wrap.querySelector(".log-filter-cat[data-cat='all']").parentElement;
+
+  function makeRow(entry) {
+    const levelStyle = entry.level === "error"
+      ? "background:rgba(239,68,68,.06);"
+      : entry.level === "warning" ? "background:rgba(245,158,11,.06);" : "";
+    return h(`<tr style="${levelStyle}">
+      <td class="mono" style="white-space:nowrap;font-size:.78rem;">${fmtDate(entry.created_at)}</td>
+      <td>${logCategoryBadge(entry.category)}</td>
+      <td>${logLevelBadge(entry.level)}</td>
+      <td style="word-break:break-word;font-size:.85rem;">${escHtml(entry.message)}</td>
+    </tr>`);
+  }
+
+  function entryVisible(e) {
+    if (activeCategory !== "all" && e.category !== activeCategory) return false;
+    if (activeLevel === "warning" && !["warning", "error"].includes(e.level)) return false;
+    if (activeLevel === "error"   && e.level !== "error") return false;
+    return true;
+  }
 
   function renderRows() {
     tbody.innerHTML = "";
-    const filtered = data.entries.filter((e) => {
-      if (activeCategory !== "all" && e.category !== activeCategory) return false;
-      if (activeLevel === "warning" && !["warning", "error"].includes(e.level)) return false;
-      if (activeLevel === "error"   && e.level !== "error") return false;
-      return true;
-    });
+    const filtered = data.entries.filter(entryVisible);
     emptyEl.style.display = filtered.length ? "none" : "";
-    countEl.textContent = `${filtered.length} / ${total} Einträge`;
-    filtered.forEach((entry) => {
-      const levelStyle = entry.level === "error"
-        ? "background:rgba(239,68,68,.06);"
-        : entry.level === "warning"
-          ? "background:rgba(245,158,11,.06);"
-          : "";
-      const row = h(`<tr style="${levelStyle}">
-        <td class="mono" style="white-space:nowrap;font-size:.78rem;">${fmtDate(entry.created_at)}</td>
-        <td>${logCategoryBadge(entry.category)}</td>
-        <td>${logLevelBadge(entry.level)}</td>
-        <td style="word-break:break-word;font-size:.85rem;">${escHtml(entry.message)}</td>
-      </tr>`);
-      tbody.appendChild(row);
-    });
+    countEl.textContent = `${filtered.length} / ${data.entries.length} Einträge`;
+    filtered.forEach((e) => tbody.appendChild(makeRow(e)));
   }
+
+  function addCatFilterBtn(cat) {
+    if (wrap.querySelector(`.log-filter-cat[data-cat="${cat}"]`)) return;
+    const btn = h(`<button class="log-filter-cat btn" data-cat="${cat}">${LOG_CATEGORY_LABEL[cat] || cat}</button>`);
+    btn.addEventListener("click", () => activateCat(cat, btn));
+    // Insert before the level label (find first non-cat child after cat buttons)
+    const levelSpan = catBar.querySelector(`span[style*="margin-left"]`);
+    catBar.insertBefore(btn, levelSpan);
+  }
+
+  function activateCat(cat, btn) {
+    wrap.querySelectorAll(".log-filter-cat").forEach((b) => b.classList.remove("active-filter"));
+    btn.classList.add("active-filter");
+    activeCategory = cat;
+    renderRows();
+  }
+
+  // Live polling — only fetches new entries (since_id), prepends to table
+  async function pollOnce() {
+    if (!liveMode || !tbody.isConnected) { stopLive(); return; }
+    try {
+      const fresh = await api(`/api/logs?since_id=${maxId}&limit=200`);
+      if (fresh.entries.length) {
+        maxId = fresh.entries.reduce((m, e) => Math.max(m, e.id), maxId);
+        data.entries.unshift(...fresh.entries);
+        fresh.entries.forEach((e) => {
+          if (!catsPresent.includes(e.category)) { catsPresent.push(e.category); addCatFilterBtn(e.category); }
+          if (entryVisible(e)) tbody.insertBefore(makeRow(e), tbody.firstChild);
+        });
+        countEl.textContent = `${data.entries.filter(entryVisible).length} / ${data.entries.length} Einträge`;
+        emptyEl.style.display = data.entries.filter(entryVisible).length ? "none" : "";
+      }
+    } catch (_) { /* ignore poll errors */ }
+    if (liveMode && tbody.isConnected) liveTimer = setTimeout(pollOnce, 3000);
+  }
+
+  function startLive() {
+    liveMode = true;
+    liveBtn.textContent = "⏹ Live läuft";
+    liveBtn.classList.add("active-filter");
+    pollOnce();
+  }
+
+  function stopLive() {
+    liveMode = false;
+    if (liveTimer) { clearTimeout(liveTimer); liveTimer = null; }
+    liveBtn.textContent = "▶ Live";
+    liveBtn.classList.remove("active-filter");
+  }
+
+  liveBtn.addEventListener("click", () => liveMode ? stopLive() : startLive());
 
   renderRows();
 
-  // Category filter
   wrap.querySelectorAll(".log-filter-cat").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      wrap.querySelectorAll(".log-filter-cat").forEach((b) => b.classList.remove("active-filter"));
-      btn.classList.add("active-filter");
-      activeCategory = btn.dataset.cat;
-      renderRows();
-    });
+    btn.addEventListener("click", () => activateCat(btn.dataset.cat, btn));
   });
 
-  // Level filter
   wrap.querySelectorAll(".log-filter-lvl").forEach((btn) => {
     btn.addEventListener("click", () => {
       wrap.querySelectorAll(".log-filter-lvl").forEach((b) => b.classList.remove("active-filter"));
@@ -1341,7 +1390,6 @@ async function logsPage() {
     });
   });
 
-  // Aufbewahrung einstellen
   wrap.querySelector("#log-settings-btn").addEventListener("click", async () => {
     const input = prompt(`Log-Aufbewahrung in Tagen (0 = unbegrenzt):`, settings.retention_days);
     if (input === null) return;
@@ -1352,7 +1400,6 @@ async function logsPage() {
     navigate("logs");
   });
 
-  // Manuell bereinigen
   wrap.querySelector("#log-purge-btn").addEventListener("click", async () => {
     if (settings.retention_days <= 0) { toast("Aufbewahrung ist unbegrenzt — zuerst Tage einstellen", "error"); return; }
     if (!confirm(`Alle Log-Einträge älter als ${settings.retention_days} Tage löschen?`)) return;

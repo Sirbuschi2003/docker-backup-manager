@@ -77,10 +77,13 @@ def purge_old_entries(retention_days: int) -> int:
         db.close()
 
 
-def list_entries(limit: int = 200) -> list[LogEntry]:
+def list_entries(limit: int = 200, since_id: int = 0) -> list[LogEntry]:
     db = SessionLocal()
     try:
-        return db.query(LogEntry).order_by(LogEntry.created_at.desc()).limit(limit).all()
+        q = db.query(LogEntry)
+        if since_id:
+            q = q.filter(LogEntry.id > since_id)
+        return q.order_by(LogEntry.created_at.desc()).limit(limit).all()
     finally:
         db.close()
 

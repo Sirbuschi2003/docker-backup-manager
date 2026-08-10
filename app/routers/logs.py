@@ -9,8 +9,8 @@ router = APIRouter(prefix="/api/logs", tags=["logs"])
 
 
 @router.get("")
-def list_logs(limit: int = 200, user: User = Depends(get_current_user)):
-    entries = event_log.list_entries(limit=min(limit, 2000))
+def list_logs(limit: int = 200, since_id: int = 0, user: User = Depends(get_current_user)):
+    entries = event_log.list_entries(limit=min(limit, 2000), since_id=since_id)
     return {
         "entries": [
             {

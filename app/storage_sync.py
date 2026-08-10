@@ -716,8 +716,22 @@ def get_target_space_info(target_type: str, config_json: str) -> dict:
             usage = shutil.disk_usage(config.get("path", "/"))
             return {"total_bytes": usage.total, "used_bytes": usage.used, "free_bytes": usage.free}
         elif target_type == "smb":
-            # smbclient.statvfs is unreliable on some NAS implementations.
-            # Use the same rclone-SMB approach as restic so we get a real answer.
+            import smbclient as _smbclient
+            _smb_register_session(config)
+            # statvfs must target the share root — subdirectory paths are not
+            # supported by all SMB server implementations (TrueNAS, Synology, …)
+            share_root = f"\\\\{config['server']}\\{config['share']}"
+            try:
+                stat = _smbclient.statvfs(share_root)
+                total = stat.f_blocks * stat.f_frsize
+                free  = stat.f_bfree  * stat.f_frsize
+                if total > 0:
+                    _space_logger.info("SMB statvfs %s: total=%d free=%d", share_root, total, free)
+                    return {"total_bytes": total, "used_bytes": total - free, "free_bytes": free}
+                _space_logger.warning("SMB statvfs %s returned zero blocks — trying rclone about", share_root)
+            except Exception as exc:
+                _space_logger.warning("SMB statvfs %s fehlgeschlagen: %s — versuche rclone about", share_root, exc)
+            # Fallback: rclone about with a temporary SMB rclone config
             from app import restic_engine
             smb_conf_path = restic_engine._write_smb_rclone_conf(config)
             try:
