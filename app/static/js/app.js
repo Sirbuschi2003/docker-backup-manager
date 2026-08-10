@@ -1164,9 +1164,20 @@ async function openScheduleModal(existing) {
 const LOG_CATEGORY_LABEL = { backup: "Backup", restore: "Restore", schedule: "Zeitplan" };
 
 async function logsPage() {
-  const data = await api("/api/logs?limit=300").catch((e) => { toast(e.message, "error"); return { entries: [] }; });
+  const [data, settings] = await Promise.all([
+    api("/api/logs?limit=500").catch((e) => { toast(e.message, "error"); return { entries: [], total: 0 }; }),
+    api("/api/logs/settings").catch(() => ({ retention_days: 90 })),
+  ]);
+  const total = data.total || data.entries.length;
   const wrap = h(`<div>
-    <div class="page-header"><h2>Logs</h2></div>
+    <div class="page-header">
+      <h2>Logs</h2>
+      <div class="actions">
+        <span class="muted" style="font-size:.82rem;">${total} Einträge gesamt</span>
+        <button class="btn" id="log-settings-btn" style="font-size:.82rem;">Aufbewahrung: ${settings.retention_days > 0 ? settings.retention_days + " Tage" : "unbegrenzt"}</button>
+        <button class="btn danger" id="log-purge-btn" style="font-size:.82rem;">Jetzt bereinigen</button>
+      </div>
+    </div>
     <div class="card" style="padding:0">
       <table>
         <thead><tr><th>Zeitpunkt</th><th>Kategorie</th><th>Meldung</th></tr></thead>
@@ -1180,12 +1191,33 @@ async function logsPage() {
   }
   data.entries.forEach((entry) => {
     const row = h(`<tr>
-      <td class="mono">${fmtDate(entry.created_at)}</td>
+      <td class="mono" style="white-space:nowrap">${fmtDate(entry.created_at)}</td>
       <td><span class="badge ${entry.level === "error" ? "failed" : "ok"}">${LOG_CATEGORY_LABEL[entry.category] || entry.category}</span></td>
-      <td>${entry.message}</td>
+      <td style="word-break:break-word">${escHtml(entry.message)}</td>
     </tr>`);
     tbody.appendChild(row);
   });
+
+  // Aufbewahrung einstellen
+  wrap.querySelector("#log-settings-btn").addEventListener("click", async () => {
+    const input = prompt(`Log-Aufbewahrung in Tagen (0 = unbegrenzt):`, settings.retention_days);
+    if (input === null) return;
+    const days = parseInt(input, 10);
+    if (isNaN(days) || days < 0) { toast("Ungültige Eingabe", "error"); return; }
+    await api("/api/logs/settings", { method: "PUT", body: JSON.stringify({ retention_days: days }) });
+    toast(`Aufbewahrung auf ${days > 0 ? days + " Tage" : "unbegrenzt"} gesetzt`);
+    navigate("logs");
+  });
+
+  // Manuell bereinigen
+  wrap.querySelector("#log-purge-btn").addEventListener("click", async () => {
+    if (settings.retention_days <= 0) { toast("Aufbewahrung ist unbegrenzt — zuerst Tage einstellen", "error"); return; }
+    if (!confirm(`Alle Log-Einträge älter als ${settings.retention_days} Tage löschen?`)) return;
+    const res = await api("/api/logs/purge", { method: "POST" });
+    toast(`${res.deleted} Einträge gelöscht`);
+    navigate("logs");
+  });
+
   return wrap;
 }
 

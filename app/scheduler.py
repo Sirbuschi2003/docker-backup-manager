@@ -209,10 +209,21 @@ def load_all_schedules():
         db.close()
 
 
+def _purge_old_logs():
+    deleted = event_log.purge_old_entries(event_log.DEFAULT_LOG_RETENTION_DAYS)
+    if deleted:
+        logger.info("Log-Rotation: %d alte Einträge gelöscht", deleted)
+
+
 def start():
     if not scheduler.running:
         scheduler.start()
     load_all_schedules()
+    # Daily log rotation at 03:30
+    scheduler.add_job(
+        _purge_old_logs, CronTrigger(hour=3, minute=30, timezone=TZ_NAME),
+        id="log-rotation", replace_existing=True,
+    )
 
 
 def shutdown():
