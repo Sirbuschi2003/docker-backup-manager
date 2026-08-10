@@ -254,6 +254,10 @@ def _run_remote_cleanup(task: dict) -> list[str]:
                 if task["is_last"]:
                     _bg_logger.info("Letzter Record für '%s' — lösche Restic-Repo auf '%s'", task["name"], t["name"])
                     restic_engine.purge_restic_repo(task["name"], stream_target)
+                    # After both timestamp-dir and restic_repo are gone, the container-level
+                    # folder should be empty — try to remove it (silent on failure)
+                    container_key = rel_key.split("/")[0]
+                    storage_sync.try_rmdir_on_target(t["type"], t["config_json"], container_key)
                 else:
                     _bg_logger.info("Nicht letzter Record für '%s' — Restic-Repo bleibt erhalten", task["name"])
             else:
