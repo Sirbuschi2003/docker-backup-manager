@@ -683,26 +683,27 @@ import logging as _logging
 _space_logger = _logging.getLogger("dbm.space")
 
 
-def _rclone_about(rclone_remote: str, rclone_conf_path: str) -> dict:
-    """Runs 'rclone about' and returns {total_bytes, used_bytes, free_bytes}.
+def _rclone_about(rclone_target: str, rclone_conf_path: str) -> dict:
+    """Runs 'rclone about <rclone_target>' and returns {total_bytes, used_bytes, free_bytes}.
+    rclone_target must be a full rclone path like 'myremote:' or 'myremote:share/path'.
     Any value may be None; never raises."""
     try:
         proc = subprocess.run(
-            ["rclone", "about", f"{rclone_remote}:", "--json", "--config", rclone_conf_path],
+            ["rclone", "about", rclone_target, "--json", "--config", rclone_conf_path],
             capture_output=True, text=True, timeout=60,
         )
         if proc.returncode != 0:
-            _space_logger.warning("rclone about %s: exit %d — %s", rclone_remote, proc.returncode,
+            _space_logger.warning("rclone about %s: exit %d — %s", rclone_target, proc.returncode,
                                   (proc.stderr or proc.stdout or "").strip()[:300])
             return {"total_bytes": None, "used_bytes": None, "free_bytes": None}
         data = json.loads(proc.stdout)
         total = data.get("total")
         used = data.get("used")
         free = data.get("free") or (total - used if total and used else None)
-        _space_logger.info("rclone about %s: total=%s used=%s free=%s", rclone_remote, total, used, free)
+        _space_logger.info("rclone about %s: total=%s used=%s free=%s", rclone_target, total, used, free)
         return {"total_bytes": total, "used_bytes": used, "free_bytes": free}
     except Exception as exc:
-        _space_logger.warning("rclone about %s exception: %s", rclone_remote, exc)
+        _space_logger.warning("rclone about %s exception: %s", rclone_target, exc)
         return {"total_bytes": None, "used_bytes": None, "free_bytes": None}
 
 
@@ -716,33 +717,20 @@ def get_target_space_info(target_type: str, config_json: str) -> dict:
             usage = shutil.disk_usage(config.get("path", "/"))
             return {"total_bytes": usage.total, "used_bytes": usage.used, "free_bytes": usage.free}
         elif target_type == "smb":
-            import smbclient as _smbclient
-            _smb_register_session(config)
-            # statvfs must target the share root — subdirectory paths are not
-            # supported by all SMB server implementations (TrueNAS, Synology, …)
-            share_root = f"\\\\{config['server']}\\{config['share']}"
-            try:
-                stat = _smbclient.statvfs(share_root)
-                total = stat.f_blocks * stat.f_frsize
-                free  = stat.f_bfree  * stat.f_frsize
-                if total > 0:
-                    _space_logger.info("SMB statvfs %s: total=%d free=%d", share_root, total, free)
-                    return {"total_bytes": total, "used_bytes": total - free, "free_bytes": free}
-                _space_logger.warning("SMB statvfs %s returned zero blocks — trying rclone about", share_root)
-            except Exception as exc:
-                _space_logger.warning("SMB statvfs %s fehlgeschlagen: %s — versuche rclone about", share_root, exc)
-            # Fallback: rclone about with a temporary SMB rclone config
+            # rclone's SMB backend requires the share name as the first path
+            # component: "dbm_smb:share_name" — not just "dbm_smb:"
             from app import restic_engine
             smb_conf_path = restic_engine._write_smb_rclone_conf(config)
             try:
-                return _rclone_about("dbm_smb", smb_conf_path)
+                share = config["share"]
+                return _rclone_about(f"dbm_smb:{share}", smb_conf_path)
             finally:
                 Path(smb_conf_path).unlink(missing_ok=True)
         elif target_type == "rclone":
             remote = config.get("remote", "")
             if not remote:
                 return {"total_bytes": None, "used_bytes": None, "free_bytes": None}
-            return _rclone_about(remote, RCLONE_CONFIG_PATH)
+            return _rclone_about(f"{remote}:", RCLONE_CONFIG_PATH)
     except Exception:
         pass
     return {"total_bytes": None, "used_bytes": None, "free_bytes": None}
