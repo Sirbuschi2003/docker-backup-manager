@@ -1008,6 +1008,9 @@ async function openScheduleModal(existing) {
           </div>
           <label style="margin-top:8px; display:block;">Oder: Name enthält (überschreibt die Auswahl oben)</label>
           <input type="text" id="s-name-contains" placeholder="z. B. nextcloud-aio" />
+          <label style="margin-top:8px; display:block;">Container ausschließen (kommagetrennt)</label>
+          <input type="text" id="s-exclude-names" placeholder="z. B. borgbackup,watchtower" />
+          <div class="muted" style="font-size:.75rem; margin-top:4px;">Container deren Name einen dieser Begriffe enthält werden übersprungen.</div>
         </div>
         <div class="field"><label>Wie oft?</label>
           <select id="s-freq">
@@ -1081,6 +1084,7 @@ async function openScheduleModal(existing) {
     if (existing.target_type === "container") overlay.querySelector("#s-target-ref").value = existing.target_ref || "";
     overlay.querySelector("#s-project-filter").value = existing.project_filter || "";
     overlay.querySelector("#s-name-contains").value = existing.name_contains || "";
+    overlay.querySelector("#s-exclude-names").value = existing.exclude_names || "";
     (existing.storage_target_ids || []).forEach((id) => {
       const cb = overlay.querySelector(`.s-storage-target[value="${id}"]`);
       if (cb) cb.checked = true;
@@ -1139,6 +1143,7 @@ async function openScheduleModal(existing) {
       storage_target_ids: storageTargetIds,
       stream_volumes_target_id: overlay.querySelector("#s-stream-target").value
         ? parseInt(overlay.querySelector("#s-stream-target").value, 10) : null,
+      exclude_names: overlay.querySelector("#s-exclude-names").value.trim() || null,
       stop_containers: overlay.querySelector("#s-stop-containers").checked,
       enabled: existing ? existing.enabled : true,
     };

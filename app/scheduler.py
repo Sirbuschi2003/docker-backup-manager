@@ -56,6 +56,7 @@ def run_schedule(schedule_id: int):
             else:
                 result = backup_engine.backup_landscape(BACKUPS_DIR, project_filter=sched.project_filter,
                                                           name_contains=sched.name_contains,
+                                                          exclude_names=sched.exclude_names,
                                                           label=sched.name, on_progress=progress,
                                                           stream_target=stream_target, should_cancel=should_cancel,
                                                           stop_containers=sched.stop_containers, on_bytes=on_bytes,

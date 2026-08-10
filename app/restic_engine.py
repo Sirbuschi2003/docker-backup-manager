@@ -438,7 +438,9 @@ def backup_volume_from_stream(
                 sid = data.get("snapshot_id", "")
                 if sid:
                     logger.info("Restic-Snapshot %s erstellt (tag=%s)", sid[:8], tag)
-                    return sid, data.get("total_bytes_processed", 0)
+                    # data_added_packed = compressed bytes newly stored in the repo
+                    # (i.e. the actual incremental delta, not the full source size)
+                    return sid, data.get("data_added_packed", 0)
         except json.JSONDecodeError:
             pass
 
