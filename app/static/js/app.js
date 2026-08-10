@@ -445,7 +445,7 @@ async function dashboardPage() {
 
   const wrap = h(`<div>
     <div class="page-header"><h2>Dashboard</h2></div>
-    <div class="grid cols-4">
+    <div class="grid cols-3">
       <div class="card stat-card">
         <div class="label">Docker-Status</div>
         <div class="value">${overview.docker_available ? "✅ Verbunden" : "⚠️ Nicht erreichbar"}</div>
@@ -454,11 +454,6 @@ async function dashboardPage() {
       <div class="card stat-card">
         <div class="label">Backups gesamt</div>
         <div class="value">${totalBackups}</div>
-      </div>
-      <div class="card stat-card">
-        <div class="label">Speicherverbrauch</div>
-        <div class="value">${fmtBytes(overview.backups_total_bytes)}</div>
-        <div class="sub mono">${overview.backups_dir}</div>
       </div>
       <div class="card stat-card">
         <div class="label">Letztes Backup</div>
