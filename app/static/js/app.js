@@ -1247,6 +1247,21 @@ async function settingsPage() {
       <span class="muted" style="font-size:.88rem;">Wird geprüft …</span>
     </div>
 
+    <div class="section-title">Konfiguration sichern &amp; wiederherstellen</div>
+    <div class="card" style="display:flex; flex-wrap:wrap; gap:12px; align-items:center;">
+      <div style="flex:1; min-width:200px;">
+        <div style="font-size:.88rem; margin-bottom:4px;">Exportiert Zeitpläne, Speicherziele und Benutzer als JSON-Datei.</div>
+        <div class="muted" style="font-size:.78rem;">Backup-Daten selbst sind nicht enthalten — nur die Programmeinstellungen.</div>
+      </div>
+      <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        <button class="btn primary" id="config-export-btn">↓ Einstellungen exportieren</button>
+        <label class="btn" style="cursor:pointer;">
+          ↑ Einstellungen importieren
+          <input type="file" id="config-import-file" accept=".json" style="display:none">
+        </label>
+      </div>
+    </div>
+
     <div class="section-title">Sitzung &amp; Sicherheit</div>
     <div class="card">
       <p style="margin:0 0 4px">Sitzungs-Timeout: <strong>${overview.session_max_age_hours} Stunden</strong>
@@ -1382,6 +1397,35 @@ async function settingsPage() {
     }
   }).catch(() => {
     updateCard.innerHTML = `<span class="muted" style="font-size:.88rem;">Update-Prüfung nicht möglich (kein Internetzugang?).</span>`;
+  });
+
+  wrap.querySelector("#config-export-btn").addEventListener("click", async () => {
+    try {
+      const resp = await fetch("/api/settings/export", { headers: { Authorization: "Bearer " + getToken() } });
+      if (!resp.ok) { const e = await resp.json(); throw new Error(e.detail || "Export fehlgeschlagen"); }
+      const cd = resp.headers.get("Content-Disposition") || "";
+      const fnMatch = cd.match(/filename="([^"]+)"/);
+      const filename = fnMatch ? fnMatch[1] : "dbm-config.json";
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = filename; a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) { toast(e.message, "error"); }
+  });
+
+  wrap.querySelector("#config-import-file").addEventListener("change", async (evt) => {
+    const file = evt.target.files[0];
+    if (!file) return;
+    evt.target.value = "";
+    let data;
+    try { data = JSON.parse(await file.text()); }
+    catch { toast("Ungültige JSON-Datei", "error"); return; }
+    const overwrite = confirm("Bereits vorhandene Einträge (gleicher Name) überschreiben?\n\nOK = überschreiben, Abbrechen = überspringen");
+    try {
+      const result = await api("/api/settings/import", { method: "POST", body: JSON.stringify({ data, overwrite }) });
+      toast(`Import abgeschlossen: ${result.targets} Ziele, ${result.schedules} Zeitpläne, ${result.users} Nutzer importiert (${result.skipped} übersprungen)`);
+    } catch (e) { toast(e.message, "error"); }
   });
 
   wrap.querySelector("#change-pass-btn").addEventListener("click", async () => {
