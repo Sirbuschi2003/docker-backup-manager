@@ -72,6 +72,7 @@ button, input, select { font-family: inherit; font-size: inherit; }
   background: var(--bg-elev-2); color: var(--text); cursor: pointer; font-size: .88rem; font-weight: 500;
 }
 .btn:hover { border-color: var(--accent); }
+.btn.active-filter { background: var(--accent); border-color: var(--accent); color: #fff; }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 .btn.primary:hover { filter: brightness(1.08); }
 .btn.danger { color: var(--danger); }

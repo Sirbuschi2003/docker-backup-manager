@@ -8,6 +8,10 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
 from app import scheduler
+from app.config import SECRET_KEY, SESSION_COOKIE_NAME, SESSION_HTTPS_ONLY, SESSION_MAX_AGE
+from app.database import init_db
+from app.event_log import DBLogHandler
+from app.routers import auth, backups, containers, jobs, logs, schedules, settings
 
 # dbm.* loggers have no handlers in uvicorn's default config (only uvicorn.* are
 # configured). Without this, all INFO messages from dbm.remote_cleanup etc. are
@@ -16,11 +20,12 @@ _dbm_handler = logging.StreamHandler(sys.stdout)
 _dbm_handler.setFormatter(logging.Formatter("%(asctime)s  %(levelname)-8s  %(name)s - %(message)s"))
 _dbm_logger = logging.getLogger("dbm")
 _dbm_logger.addHandler(_dbm_handler)
+# Also write to the persistent DB log so entries appear in the web UI
+_db_log_handler = DBLogHandler()
+_db_log_handler.setLevel(logging.INFO)
+_dbm_logger.addHandler(_db_log_handler)
 _dbm_logger.setLevel(logging.INFO)
 _dbm_logger.propagate = False
-from app.config import SECRET_KEY, SESSION_COOKIE_NAME, SESSION_HTTPS_ONLY, SESSION_MAX_AGE
-from app.database import init_db
-from app.routers import auth, backups, containers, jobs, logs, schedules, settings
 
 STATIC_DIR = Path(__file__).parent / "static"
 

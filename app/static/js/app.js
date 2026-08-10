@@ -1205,41 +1205,140 @@ async function openScheduleModal(existing) {
 }
 
 // ---------- Logs ----------
-const LOG_CATEGORY_LABEL = { backup: "Backup", restore: "Restore", schedule: "Zeitplan" };
+const LOG_CATEGORY_LABEL = {
+  backup:    "Backup",
+  restore:   "Restore",
+  schedule:  "Zeitplan",
+  scheduler: "Zeitplan",
+  cleanup:   "Bereinigung",
+  restic:    "Restic",
+  space:     "Speicher",
+};
+
+const LOG_CATEGORY_COLOR = {
+  backup:    "#3b82f6",
+  restore:   "#8b5cf6",
+  schedule:  "#0ea5e9",
+  scheduler: "#0ea5e9",
+  cleanup:   "#f59e0b",
+  restic:    "#10b981",
+  space:     "#6366f1",
+};
+
+function logCategoryBadge(cat) {
+  const label = LOG_CATEGORY_LABEL[cat] || cat;
+  const color = LOG_CATEGORY_COLOR[cat] || "var(--accent)";
+  return `<span style="display:inline-block;padding:2px 8px;border-radius:99px;font-size:.72rem;font-weight:600;background:${color}22;color:${color};border:1px solid ${color}44">${label}</span>`;
+}
+
+function logLevelBadge(level) {
+  if (level === "error")   return `<span style="color:#ef4444;font-weight:700;font-size:.8rem;">● Fehler</span>`;
+  if (level === "warning") return `<span style="color:#f59e0b;font-weight:700;font-size:.8rem;">● Warnung</span>`;
+  return `<span style="color:var(--muted);font-size:.8rem;">● Info</span>`;
+}
 
 async function logsPage() {
   const [data, settings] = await Promise.all([
-    api("/api/logs?limit=500").catch((e) => { toast(e.message, "error"); return { entries: [], total: 0 }; }),
+    api("/api/logs?limit=2000").catch((e) => { toast(e.message, "error"); return { entries: [], total: 0 }; }),
     api("/api/logs/settings").catch(() => ({ retention_days: 90 })),
   ]);
   const total = data.total || data.entries.length;
+
+  // Collect categories present in data
+  const catsPresent = [...new Set(data.entries.map((e) => e.category))].sort();
+  let activeCategory = "all";
+  let activeLevel = "all";
+
   const wrap = h(`<div>
     <div class="page-header">
       <h2>Logs</h2>
       <div class="actions">
-        <span class="muted" style="font-size:.82rem;">${total} Einträge gesamt</span>
+        <span class="muted" style="font-size:.82rem;" id="log-count">${total} Einträge gesamt</span>
         <button class="btn" id="log-settings-btn" style="font-size:.82rem;">Aufbewahrung: ${settings.retention_days > 0 ? settings.retention_days + " Tage" : "unbegrenzt"}</button>
         <button class="btn danger" id="log-purge-btn" style="font-size:.82rem;">Jetzt bereinigen</button>
       </div>
     </div>
-    <div class="card" style="padding:0">
-      <table>
-        <thead><tr><th>Zeitpunkt</th><th>Kategorie</th><th>Meldung</th></tr></thead>
+
+    <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;align-items:center;">
+      <span class="muted" style="font-size:.8rem;margin-right:4px;">Kategorie:</span>
+      <button class="log-filter-cat btn active-filter" data-cat="all">Alle</button>
+      ${catsPresent.map((c) => `<button class="log-filter-cat btn" data-cat="${c}">${LOG_CATEGORY_LABEL[c] || c}</button>`).join("")}
+      <span class="muted" style="font-size:.8rem;margin-left:12px;margin-right:4px;">Level:</span>
+      <button class="log-filter-lvl btn active-filter" data-lvl="all">Alle</button>
+      <button class="log-filter-lvl btn" data-lvl="warning" style="color:#f59e0b;">Warnungen</button>
+      <button class="log-filter-lvl btn" data-lvl="error" style="color:#ef4444;">Fehler</button>
+    </div>
+
+    <div class="card" style="padding:0;overflow-x:auto;">
+      <table style="table-layout:fixed;width:100%;">
+        <colgroup>
+          <col style="width:155px">
+          <col style="width:115px">
+          <col style="width:90px">
+          <col>
+        </colgroup>
+        <thead><tr>
+          <th>Zeitpunkt</th>
+          <th>Kategorie</th>
+          <th>Level</th>
+          <th>Meldung</th>
+        </tr></thead>
         <tbody id="logs-tbody"></tbody>
       </table>
     </div>
+    <div id="log-empty" class="empty-state" style="display:none;">Keine Einträge für diesen Filter</div>
   </div>`);
+
   const tbody = wrap.querySelector("#logs-tbody");
-  if (!data.entries.length) {
-    tbody.appendChild(h(`<tr><td colspan="3"><div class="empty-state">Noch keine Log-Einträge vorhanden</div></td></tr>`));
+  const emptyEl = wrap.querySelector("#log-empty");
+  const countEl = wrap.querySelector("#log-count");
+
+  function renderRows() {
+    tbody.innerHTML = "";
+    const filtered = data.entries.filter((e) => {
+      if (activeCategory !== "all" && e.category !== activeCategory) return false;
+      if (activeLevel === "warning" && !["warning", "error"].includes(e.level)) return false;
+      if (activeLevel === "error"   && e.level !== "error") return false;
+      return true;
+    });
+    emptyEl.style.display = filtered.length ? "none" : "";
+    countEl.textContent = `${filtered.length} / ${total} Einträge`;
+    filtered.forEach((entry) => {
+      const levelStyle = entry.level === "error"
+        ? "background:rgba(239,68,68,.06);"
+        : entry.level === "warning"
+          ? "background:rgba(245,158,11,.06);"
+          : "";
+      const row = h(`<tr style="${levelStyle}">
+        <td class="mono" style="white-space:nowrap;font-size:.78rem;">${fmtDate(entry.created_at)}</td>
+        <td>${logCategoryBadge(entry.category)}</td>
+        <td>${logLevelBadge(entry.level)}</td>
+        <td style="word-break:break-word;font-size:.85rem;">${escHtml(entry.message)}</td>
+      </tr>`);
+      tbody.appendChild(row);
+    });
   }
-  data.entries.forEach((entry) => {
-    const row = h(`<tr>
-      <td class="mono" style="white-space:nowrap">${fmtDate(entry.created_at)}</td>
-      <td><span class="badge ${entry.level === "error" ? "failed" : "ok"}">${LOG_CATEGORY_LABEL[entry.category] || entry.category}</span></td>
-      <td style="word-break:break-word">${escHtml(entry.message)}</td>
-    </tr>`);
-    tbody.appendChild(row);
+
+  renderRows();
+
+  // Category filter
+  wrap.querySelectorAll(".log-filter-cat").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      wrap.querySelectorAll(".log-filter-cat").forEach((b) => b.classList.remove("active-filter"));
+      btn.classList.add("active-filter");
+      activeCategory = btn.dataset.cat;
+      renderRows();
+    });
+  });
+
+  // Level filter
+  wrap.querySelectorAll(".log-filter-lvl").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      wrap.querySelectorAll(".log-filter-lvl").forEach((b) => b.classList.remove("active-filter"));
+      btn.classList.add("active-filter");
+      activeLevel = btn.dataset.lvl;
+      renderRows();
+    });
   });
 
   // Aufbewahrung einstellen

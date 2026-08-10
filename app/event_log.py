@@ -9,6 +9,42 @@ from app.models import LogEntry
 
 logger = logging.getLogger("dbm.event_log")
 
+# Maps the trailing part of a dbm.* logger name to the category stored in DB.
+# None = skip (no DB entry for this logger).
+_LOGGER_CATEGORY = {
+    "remote_cleanup": "cleanup",
+    "restic_engine":  "restic",
+    "backup_engine":  "backup",
+    "scheduler":      "scheduler",
+    "space":          "space",
+    "event_log":      None,   # skip — avoid recursion
+}
+
+_LEVEL_MAP = {
+    logging.WARNING:  "warning",
+    logging.ERROR:    "error",
+    logging.CRITICAL: "error",
+}
+
+
+class DBLogHandler(logging.Handler):
+    """Writes dbm.* Python log records into LogEntry so they show up in the
+    web UI alongside the high-level schedule/backup events."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        # Derive category from the last segment of the logger name
+        parts = record.name.split(".")
+        raw = parts[-1] if len(parts) > 1 else record.name
+        category = _LOGGER_CATEGORY.get(raw, raw)
+        if category is None:
+            return
+        level = _LEVEL_MAP.get(record.levelno, "info")
+        try:
+            message = self.format(record)
+        except Exception:
+            message = record.getMessage()
+        log_event(category, message, level)
+
 # Default: keep log entries for 90 days; 0 = keep forever
 DEFAULT_LOG_RETENTION_DAYS = int(os.environ.get("DBM_LOG_RETENTION_DAYS", "90"))
 
