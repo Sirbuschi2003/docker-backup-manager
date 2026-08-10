@@ -16,7 +16,14 @@ from app.retention import VersionInfo, versions_to_prune
 
 logger = logging.getLogger("dbm.scheduler")
 
-scheduler = BackgroundScheduler(timezone=TZ_NAME)
+# misfire_grace_time=1: missed fire times older than 1 s are skipped instead of
+# immediately executed. Without this, restarting the app causes every schedule
+# whose window fell inside the downtime to fire right away — which is almost
+# always wrong for backup jobs that are meant to run at specific quiet times.
+scheduler = BackgroundScheduler(
+    timezone=TZ_NAME,
+    job_defaults={"misfire_grace_time": 1, "coalesce": True},
+)
 
 
 def _job_id(schedule_id: int) -> str:
@@ -187,6 +194,7 @@ def add_or_update_job(sched: Schedule):
         replace_existing=True,
         max_instances=1,
         coalesce=True,
+        misfire_grace_time=1,
     )
 
 
