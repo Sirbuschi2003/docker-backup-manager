@@ -405,8 +405,18 @@ async function dashboardPage() {
   const [overview, backupsData, jobsData] = await Promise.all([
     api("/api/settings/overview"), api("/api/backups"), api("/api/jobs"),
   ]);
+  // Collect member container names from landscape backups so they aren't
+  // double-counted in the dashboard total (1 Immich landscape = 1 backup, not 5)
+  const memberNames = new Set();
+  Object.values(backupsData.groups).forEach((versions) => {
+    versions.forEach((v) => {
+      if (v.backup_type === "landscape") (v.member_names || []).forEach((n) => memberNames.add(n));
+    });
+  });
   const allRecords = Object.entries(backupsData.groups).flatMap(([name, versions]) =>
-    versions.map((v) => ({ ...v, name })));
+    versions
+      .filter((v) => v.backup_type === "landscape" || !memberNames.has(name))
+      .map((v) => ({ ...v, name })));
   const totalBackups = allRecords.length;
   const lastBackup = allRecords.sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
 
