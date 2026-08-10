@@ -1,4 +1,5 @@
 // Docker Backup Manager - frontend (vanilla JS, no build step required)
+(function() { const t = localStorage.getItem("dbm-theme"); if (t) document.documentElement.dataset.theme = t; })();
 const root = document.getElementById("app");
 const state = { route: "dashboard", user: null, jobs: {} };
 
@@ -370,12 +371,23 @@ function shell(activeKey, contentEl) {
   const userRow = wrap.querySelector("#user-row");
   const adminBadge = state.user && state.user.is_admin ? ' <span class="badge ok" style="font-size:10px; padding:1px 5px;">Admin</span>' : "";
   userRow.innerHTML = `${state.user ? escHtml(state.user.username) : ""}${adminBadge} &middot; <a href="#" id="logout-link">Abmelden</a>
-    <div style="font-size:10px; color:var(--muted); margin-top:2px; opacity:0.6;">v${state.appVersion || ""}</div>`;
+    <div style="font-size:10px; color:var(--muted); margin-top:2px; opacity:0.6;">v${state.appVersion || ""}</div>
+    <button id="theme-toggle" style="margin-top:8px; width:100%; background:none; border:1px solid var(--border); border-radius:6px; color:var(--text-dim); cursor:pointer; padding:4px 8px; font-size:.75rem;">🌙 Dark / ☀️ Light</button>`;
   userRow.querySelector("#logout-link").addEventListener("click", async (e) => {
     e.preventDefault();
     await api("/api/auth/logout", { method: "POST" });
     render(loginScreen());
   });
+  (function() {
+    const saved = localStorage.getItem("dbm-theme");
+    if (saved) document.documentElement.dataset.theme = saved;
+    userRow.querySelector("#theme-toggle").addEventListener("click", () => {
+      const cur = document.documentElement.dataset.theme;
+      const next = (cur === "light") ? "dark" : "light";
+      document.documentElement.dataset.theme = next;
+      localStorage.setItem("dbm-theme", next);
+    });
+  })();
   wrap.querySelector("#main").appendChild(contentEl);
   return wrap;
 }
@@ -402,9 +414,20 @@ async function navigate(key) {
 
 // ---------- Dashboard ----------
 async function dashboardPage() {
-  const [overview, backupsData, jobsData] = await Promise.all([
+  const [overview, backupsData, jobsData, targetsData] = await Promise.all([
     api("/api/settings/overview"), api("/api/backups"), api("/api/jobs"),
+    api("/api/settings/storage-targets").catch(() => ({ targets: [] })),
   ]);
+
+  const enabledTargets = (targetsData.targets || []).filter((t) => t.enabled);
+  const spaceResults = await Promise.all(
+    enabledTargets.map((t) =>
+      api(`/api/settings/storage-targets/${t.id}/space`)
+        .then((s) => ({ ...t, space: s }))
+        .catch(() => ({ ...t, space: null }))
+    )
+  );
+  const targetsWithSpace = spaceResults.filter((t) => t.space && t.space.total_bytes != null);
   // Collect member container names from landscape backups so they aren't
   // double-counted in the dashboard total (1 Immich landscape = 1 backup, not 5)
   const memberNames = new Set();
@@ -443,6 +466,22 @@ async function dashboardPage() {
         <div class="sub">${lastBackup ? fmtDate(lastBackup.created_at) : ""}</div>
       </div>
     </div>
+    ${targetsWithSpace.length ? `
+    <div class="section-title">Speicherplatz Ziele</div>
+    <div class="grid cols-3">
+      ${targetsWithSpace.map((t) => {
+        const pct = t.space.total_bytes ? Math.round((t.space.used_bytes / t.space.total_bytes) * 100) : null;
+        const barColor = pct == null ? "var(--accent)" : pct >= 90 ? "var(--error, #e05)" : pct >= 75 ? "var(--warn)" : "var(--accent)";
+        return `<div class="card stat-card">
+          <div class="label">${t.name} <span class="muted" style="font-size:.75rem">(${t.type})</span></div>
+          <div class="value" style="font-size:1.15rem">${fmtBytes(t.space.free_bytes)} frei</div>
+          <div class="sub">${fmtBytes(t.space.used_bytes)} / ${fmtBytes(t.space.total_bytes)}</div>
+          ${pct != null ? `<div style="margin-top:8px; background:var(--bg); border-radius:4px; height:6px; overflow:hidden;">
+            <div style="width:${pct}%; height:100%; background:${barColor}; transition:width .3s;"></div>
+          </div>` : ""}
+        </div>`;
+      }).join("")}
+    </div>` : ""}
     ${overview.encryption_error
       ? `<div class="card" style="margin-top:16px; border-color: var(--warn);">
            ⚠️ <span class="mono">DBM_ENCRYPTION_KEY</span> ist ungültig: ${overview.encryption_error}
@@ -1401,7 +1440,7 @@ async function settingsPage() {
 
   wrap.querySelector("#config-export-btn").addEventListener("click", async () => {
     try {
-      const resp = await fetch("/api/settings/export", { headers: { Authorization: "Bearer " + getToken() } });
+      const resp = await fetch("/api/settings/export", { credentials: "same-origin" });
       if (!resp.ok) { const e = await resp.json(); throw new Error(e.detail || "Export fehlgeschlagen"); }
       const cd = resp.headers.get("Content-Disposition") || "";
       const fnMatch = cd.match(/filename="([^"]+)"/);

@@ -643,6 +643,42 @@ def check_target_connection(target_type: str, config_json: str) -> None:
         raise ValueError(f"Unknown storage target type: {target_type}")
 
 
+def get_target_space_info(target_type: str, config_json: str) -> dict:
+    """Returns disk usage for a storage target.
+    Result: {total_bytes, used_bytes, free_bytes} — any value may be None if unsupported."""
+    config = json.loads(config_json or "{}")
+    if target_type == "local_path":
+        usage = shutil.disk_usage(config.get("path", "/"))
+        return {"total_bytes": usage.total, "used_bytes": usage.used, "free_bytes": usage.free}
+    elif target_type == "smb":
+        import smbclient
+        _smb_register_session(config)
+        root = _smb_remote_root(config, "")
+        stat = smbclient.statvfs(root)
+        total = stat.f_blocks * stat.f_frsize
+        free = stat.f_bfree * stat.f_frsize
+        return {"total_bytes": total, "used_bytes": total - free, "free_bytes": free}
+    elif target_type in ("rclone",):
+        remote = config.get("remote", "")
+        if not remote:
+            return {"total_bytes": None, "used_bytes": None, "free_bytes": None}
+        proc = subprocess.run(
+            ["rclone", "about", f"{remote}:", "--json", "--config", RCLONE_CONFIG_PATH],
+            capture_output=True, text=True, timeout=30,
+        )
+        if proc.returncode != 0:
+            return {"total_bytes": None, "used_bytes": None, "free_bytes": None}
+        try:
+            data = json.loads(proc.stdout)
+            total = data.get("total")
+            used = data.get("used")
+            free = data.get("free") or (total - used if total and used else None)
+            return {"total_bytes": total, "used_bytes": used, "free_bytes": free}
+        except Exception:
+            return {"total_bytes": None, "used_bytes": None, "free_bytes": None}
+    return {"total_bytes": None, "used_bytes": None, "free_bytes": None}
+
+
 # ---------- Catalog import: discover + pull back backups that already exist
 # on a target (e.g. a fresh install pointed at an old NAS/S3 bucket/rclone
 # remote after a full host loss) ----------

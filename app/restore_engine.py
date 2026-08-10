@@ -16,7 +16,6 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
-from typing import Optional
 from typing import Callable, Optional
 
 from app import encryption, restic_engine, storage_sync
@@ -241,7 +240,7 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
             )
             local_image_tar = dl_dest
         with open(local_image_tar, "rb") as f:
-            loaded = client.images.load(f.read())
+            loaded = client.images.load(f)
         image_ref = loaded[0].tags[0] if loaded and loaded[0].tags else loaded[0].id
 
         step += 1

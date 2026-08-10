@@ -283,8 +283,6 @@ def delete_backup(backup_id: int, db: Session = Depends(get_db), user: User = De
     members: list[BackupRecord] = []
     if record.backup_type == "landscape":
         members = _find_member_records(record, db)
-        # Snapshot info for each member, excluding all member IDs from "is_last" check
-        all_member_ids = {m.id for m in members}
         for m in members:
             all_tasks.append(_snapshot_remote_task(m, db, exclude_id=m.id))
     all_tasks.append(_snapshot_remote_task(record, db, exclude_id=record.id))

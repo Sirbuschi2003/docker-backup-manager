@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -20,7 +20,7 @@ from app.auth import get_current_user
 from app.config import APP_VERSION, BACKUPS_DIR, DEFAULT_RETENTION_COUNT, DEFAULT_RETENTION_DAYS, GITHUB_REPO, SESSION_MAX_AGE, TZ_ERROR, TZ_NAME
 from app.database import get_db
 from app.docker_client import is_available
-from app.models import BackupRecord, StorageTarget, User
+from app.models import BackupRecord, Schedule, StorageTarget, User
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -209,6 +209,18 @@ def _target_config_for_response(target_type: str, config: dict) -> dict:
         config = {**config, "connected": bool(config.get("refresh_token"))}
         config.pop("refresh_token", None)
     return config
+
+
+@router.get("/storage-targets/{target_id}/space")
+def get_target_space(target_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Returns free/used/total bytes for a storage target. Not all types are supported."""
+    target = db.query(StorageTarget).filter(StorageTarget.id == target_id).first()
+    if not target:
+        raise HTTPException(404, "Storage target not found")
+    try:
+        return storage_sync.get_target_space_info(target.type, target.config_json)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, f"Speicherplatz-Abfrage fehlgeschlagen: {exc}")
 
 
 @router.get("/storage-targets")
@@ -430,3 +442,149 @@ def oauth_complete(payload: OAuthCompletePayload, db: Session = Depends(get_db),
     db.commit()
     db.refresh(target)
     return {"id": target.id, "account": pending["account"]}
+
+
+# ── Config export / import ──────────────────────────────────────────────────
+
+@router.get("/export")
+def export_config(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Download all schedules, storage targets and users as a JSON backup."""
+    targets = db.query(StorageTarget).order_by(StorageTarget.id).all()
+    schedules = db.query(Schedule).order_by(Schedule.id).all()
+    users = db.query(User).order_by(User.id).all()
+
+    payload = {
+        "dbm_config_version": 1,
+        "exported_at": datetime.datetime.utcnow().isoformat() + "Z",
+        "app_version": APP_VERSION,
+        "storage_targets": [
+            {
+                "name": t.name, "type": t.type,
+                "config": json.loads(t.config_json),
+                "enabled": t.enabled,
+            } for t in targets
+        ],
+        "schedules": [
+            {
+                "name": s.name, "target_type": s.target_type,
+                "target_ref": s.target_ref, "project_filter": s.project_filter,
+                "name_contains": s.name_contains, "exclude_names": s.exclude_names,
+                "cron_expression": s.cron_expression,
+                "retention_count": s.retention_count, "retention_days": s.retention_days,
+                "stop_containers": s.stop_containers, "enabled": s.enabled,
+                # stream/sync targets referenced by name so they survive re-import
+                "stream_target_name": next(
+                    (t.name for t in targets if t.id == s.stream_volumes_target_id), None
+                ),
+                "sync_target_names": [
+                    t.name for t in targets
+                    if t.id in json.loads(s.storage_target_ids or "[]")
+                ],
+            } for s in schedules
+        ],
+        "users": [
+            {
+                "username": u.username,
+                "password_hash": u.password_hash,
+                "is_admin": u.is_admin,
+            } for u in users
+        ],
+    }
+    filename = f"dbm-config-{datetime.datetime.utcnow().strftime('%Y%m%d-%H%M%S')}.json"
+    return JSONResponse(
+        content=payload,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+class ImportConfigPayload(BaseModel):
+    data: dict
+    overwrite: bool = False  # if True, existing targets/schedules with same name are replaced
+
+
+@router.post("/import")
+def import_config(payload: ImportConfigPayload, db: Session = Depends(get_db),
+                  user: User = Depends(get_current_user)):
+    """Restore schedules and storage targets from a previously exported JSON."""
+    data = payload.data
+    if data.get("dbm_config_version") != 1:
+        raise HTTPException(400, "Unbekanntes Exportformat — bitte eine Datei verwenden die von dieser App exportiert wurde.")
+
+    imported = {"targets": 0, "schedules": 0, "users": 0, "skipped": 0}
+
+    # 1. Storage targets
+    name_to_target: dict[str, StorageTarget] = {}
+    for td in data.get("storage_targets", []):
+        existing = db.query(StorageTarget).filter(StorageTarget.name == td["name"]).first()
+        if existing:
+            if payload.overwrite:
+                existing.type = td["type"]
+                existing.config_json = json.dumps(td["config"])
+                existing.enabled = td.get("enabled", True)
+                name_to_target[td["name"]] = existing
+                imported["targets"] += 1
+            else:
+                name_to_target[td["name"]] = existing
+                imported["skipped"] += 1
+        else:
+            t = StorageTarget(
+                name=td["name"], type=td["type"],
+                config_json=json.dumps(td["config"]),
+                enabled=td.get("enabled", True),
+            )
+            db.add(t)
+            db.flush()
+            name_to_target[td["name"]] = t
+            imported["targets"] += 1
+
+    # 2. Schedules
+    for sd in data.get("schedules", []):
+        existing = db.query(Schedule).filter(Schedule.name == sd["name"]).first()
+        stream_id = name_to_target[sd["stream_target_name"]].id if sd.get("stream_target_name") and sd["stream_target_name"] in name_to_target else None
+        sync_ids = json.dumps([name_to_target[n].id for n in sd.get("sync_target_names", []) if n in name_to_target])
+        if existing:
+            if payload.overwrite:
+                for k, v in sd.items():
+                    if k not in ("stream_target_name", "sync_target_names") and hasattr(existing, k):
+                        setattr(existing, k, v)
+                existing.stream_volumes_target_id = stream_id
+                existing.storage_target_ids = sync_ids
+                imported["schedules"] += 1
+            else:
+                imported["skipped"] += 1
+        else:
+            s = Schedule(
+                name=sd["name"], target_type=sd["target_type"],
+                target_ref=sd.get("target_ref"), project_filter=sd.get("project_filter"),
+                name_contains=sd.get("name_contains"), exclude_names=sd.get("exclude_names"),
+                cron_expression=sd["cron_expression"],
+                retention_count=sd.get("retention_count", 7),
+                retention_days=sd.get("retention_days", 0),
+                stop_containers=sd.get("stop_containers", False),
+                enabled=sd.get("enabled", True),
+                stream_volumes_target_id=stream_id,
+                storage_target_ids=sync_ids,
+            )
+            db.add(s)
+            imported["schedules"] += 1
+
+    # 3. Users (only import if not already existing)
+    for ud in data.get("users", []):
+        existing = db.query(User).filter(User.username == ud["username"]).first()
+        if existing:
+            imported["skipped"] += 1
+        else:
+            db.add(User(
+                username=ud["username"],
+                password_hash=ud["password_hash"],
+                is_admin=ud.get("is_admin", False),
+            ))
+            imported["users"] += 1
+
+    db.commit()
+
+    # Reload scheduler with newly imported schedules
+    from app import scheduler as scheduler_module
+    scheduler_module.load_all_schedules()
+
+    return imported
