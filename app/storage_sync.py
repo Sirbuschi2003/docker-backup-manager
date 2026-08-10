@@ -679,6 +679,10 @@ def check_target_connection(target_type: str, config_json: str) -> None:
         raise ValueError(f"Unknown storage target type: {target_type}")
 
 
+import logging as _logging
+_space_logger = _logging.getLogger("dbm.space")
+
+
 def _rclone_about(rclone_remote: str, rclone_conf_path: str) -> dict:
     """Runs 'rclone about' and returns {total_bytes, used_bytes, free_bytes}.
     Any value may be None; never raises."""
@@ -688,13 +692,17 @@ def _rclone_about(rclone_remote: str, rclone_conf_path: str) -> dict:
             capture_output=True, text=True, timeout=60,
         )
         if proc.returncode != 0:
+            _space_logger.warning("rclone about %s: exit %d — %s", rclone_remote, proc.returncode,
+                                  (proc.stderr or proc.stdout or "").strip()[:300])
             return {"total_bytes": None, "used_bytes": None, "free_bytes": None}
         data = json.loads(proc.stdout)
         total = data.get("total")
         used = data.get("used")
         free = data.get("free") or (total - used if total and used else None)
+        _space_logger.info("rclone about %s: total=%s used=%s free=%s", rclone_remote, total, used, free)
         return {"total_bytes": total, "used_bytes": used, "free_bytes": free}
-    except Exception:
+    except Exception as exc:
+        _space_logger.warning("rclone about %s exception: %s", rclone_remote, exc)
         return {"total_bytes": None, "used_bytes": None, "free_bytes": None}
 
 
