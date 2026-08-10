@@ -419,7 +419,7 @@ async function dashboardPage() {
     api("/api/settings/storage-targets").catch(() => ({ targets: [] })),
   ]);
 
-  const enabledTargets = (targetsData.targets || []).filter((t) => t.enabled);
+  const enabledTargets = (targetsData.targets || []).filter((t) => t.enabled && t.type !== "local_path");
   const spaceResults = await Promise.all(
     enabledTargets.map((t) =>
       api(`/api/settings/storage-targets/${t.id}/space`)

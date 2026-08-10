@@ -679,39 +679,50 @@ def check_target_connection(target_type: str, config_json: str) -> None:
         raise ValueError(f"Unknown storage target type: {target_type}")
 
 
-def get_target_space_info(target_type: str, config_json: str) -> dict:
-    """Returns disk usage for a storage target.
-    Result: {total_bytes, used_bytes, free_bytes} — any value may be None if unsupported."""
-    config = json.loads(config_json or "{}")
-    if target_type == "local_path":
-        usage = shutil.disk_usage(config.get("path", "/"))
-        return {"total_bytes": usage.total, "used_bytes": usage.used, "free_bytes": usage.free}
-    elif target_type == "smb":
-        import smbclient
-        _smb_register_session(config)
-        root = _smb_remote_root(config, "")
-        stat = smbclient.statvfs(root)
-        total = stat.f_blocks * stat.f_frsize
-        free = stat.f_bfree * stat.f_frsize
-        return {"total_bytes": total, "used_bytes": total - free, "free_bytes": free}
-    elif target_type in ("rclone",):
-        remote = config.get("remote", "")
-        if not remote:
-            return {"total_bytes": None, "used_bytes": None, "free_bytes": None}
+def _rclone_about(rclone_remote: str, rclone_conf_path: str) -> dict:
+    """Runs 'rclone about' and returns {total_bytes, used_bytes, free_bytes}.
+    Any value may be None; never raises."""
+    try:
         proc = subprocess.run(
-            ["rclone", "about", f"{remote}:", "--json", "--config", RCLONE_CONFIG_PATH],
-            capture_output=True, text=True, timeout=30,
+            ["rclone", "about", f"{rclone_remote}:", "--json", "--config", rclone_conf_path],
+            capture_output=True, text=True, timeout=60,
         )
         if proc.returncode != 0:
             return {"total_bytes": None, "used_bytes": None, "free_bytes": None}
-        try:
-            data = json.loads(proc.stdout)
-            total = data.get("total")
-            used = data.get("used")
-            free = data.get("free") or (total - used if total and used else None)
-            return {"total_bytes": total, "used_bytes": used, "free_bytes": free}
-        except Exception:
-            return {"total_bytes": None, "used_bytes": None, "free_bytes": None}
+        data = json.loads(proc.stdout)
+        total = data.get("total")
+        used = data.get("used")
+        free = data.get("free") or (total - used if total and used else None)
+        return {"total_bytes": total, "used_bytes": used, "free_bytes": free}
+    except Exception:
+        return {"total_bytes": None, "used_bytes": None, "free_bytes": None}
+
+
+def get_target_space_info(target_type: str, config_json: str) -> dict:
+    """Returns disk usage for a storage target.
+    Result: {total_bytes, used_bytes, free_bytes} — any value may be None if unsupported.
+    Never raises; errors result in all-None."""
+    config = json.loads(config_json or "{}")
+    try:
+        if target_type == "local_path":
+            usage = shutil.disk_usage(config.get("path", "/"))
+            return {"total_bytes": usage.total, "used_bytes": usage.used, "free_bytes": usage.free}
+        elif target_type == "smb":
+            # smbclient.statvfs is unreliable on some NAS implementations.
+            # Use the same rclone-SMB approach as restic so we get a real answer.
+            from app import restic_engine
+            smb_conf_path = restic_engine._write_smb_rclone_conf(config)
+            try:
+                return _rclone_about("dbm_smb", smb_conf_path)
+            finally:
+                Path(smb_conf_path).unlink(missing_ok=True)
+        elif target_type == "rclone":
+            remote = config.get("remote", "")
+            if not remote:
+                return {"total_bytes": None, "used_bytes": None, "free_bytes": None}
+            return _rclone_about(remote, RCLONE_CONFIG_PATH)
+    except Exception:
+        pass
     return {"total_bytes": None, "used_bytes": None, "free_bytes": None}
 
 
