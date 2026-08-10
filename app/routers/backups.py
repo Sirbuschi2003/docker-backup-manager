@@ -148,11 +148,24 @@ def _snapshot_remote_task(record: BackupRecord, db: Session, exclude_id: int = N
 
     # Read meta.json NOW — before the local directory is deleted — so the
     # background thread can forget restic snapshots without needing the file.
+    # For encrypted backups meta.json doesn't exist — only meta.json.enc does.
+    # In that case decrypt it first to get the engine/snapshot metadata.
     meta_path = Path(record.path) / "meta.json"
     meta = {}
     try:
         if meta_path.exists():
             meta = json.loads(meta_path.read_text())
+        else:
+            enc_path = Path(record.path) / "meta.json.enc"
+            if enc_path.exists():
+                import tempfile
+                from app import encryption
+                tmp = Path(tempfile.mktemp(suffix=".json"))
+                try:
+                    encryption.decrypt_file(enc_path, tmp)
+                    meta = json.loads(tmp.read_text())
+                finally:
+                    tmp.unlink(missing_ok=True)
     except Exception:
         pass
 
@@ -174,11 +187,23 @@ def _run_remote_cleanup(task: dict) -> list[str]:
     Kein DB-Zugriff, kein Lesen von meta.json — sicher im Hintergrund-Thread."""
     errors = []
     rec_path = Path(task["path"])
+    rel_key = _relative_key(rec_path)
+
+    _bg_logger.info(
+        "Remote-Bereinigung starten: name=%s path=%s engine=%s synced=%s stream=%s is_last=%s",
+        task["name"], task["path"], task["backup_engine"] or "(keins)",
+        [t["name"] for t in task["synced"]],
+        task["stream"]["name"] if task["stream"] else None,
+        task["is_last"],
+    )
 
     for t in task["synced"]:
         try:
-            storage_sync.delete_from_target(t["type"], t["config_json"], _relative_key(rec_path))
+            _bg_logger.info("Lösche synced-Kopie auf '%s': %s", t["name"], rel_key)
+            storage_sync.delete_from_target(t["type"], t["config_json"], rel_key)
+            _bg_logger.info("Synced-Kopie gelöscht: %s auf '%s'", rel_key, t["name"])
         except Exception as exc:
+            _bg_logger.warning("Fehler beim Löschen von '%s' auf '%s': %s", rel_key, t["name"], exc)
             errors.append(f"{t['name']}: {exc}")
 
     if task["stream"] and task["backup_type"] == "container":
@@ -190,6 +215,7 @@ def _run_remote_cleanup(task: dict) -> list[str]:
                 repo_url = task["restic_repo_url"]
                 snapshot_ids = task["restic_snapshot_ids"]
                 if repo_url and snapshot_ids:
+                    _bg_logger.info("Vergesse %d Restic-Snapshot(s) für '%s'", len(snapshot_ids), task["name"])
                     target_config = json.loads(t["config_json"] or "{}")
                     password = restic_engine.get_password()
                     _, env, smb_conf_path = restic_engine.repo_url_and_env(
@@ -201,29 +227,45 @@ def _run_remote_cleanup(task: dict) -> list[str]:
                                 restic_engine.forget_snapshot(repo_url, env, password, sid)
                                 _bg_logger.info("Snapshot %s vergessen (%s/%s)", sid[:8], task["name"], key)
                             except Exception as exc:
-                                _bg_logger.warning("forget_snapshot %s: %s", sid[:8], exc)
+                                _bg_logger.warning("forget_snapshot %s fehlgeschlagen: %s", sid[:8], exc)
                     finally:
                         if smb_conf_path:
                             try:
                                 Path(smb_conf_path).unlink(missing_ok=True)
                             except Exception:
                                 pass
+                elif not repo_url:
+                    _bg_logger.warning(
+                        "Restic-Repo-URL fehlt für '%s' — Snapshots können nicht vergessen werden "
+                        "(meta.json möglicherweise nicht lesbar gewesen)", task["name"]
+                    )
                 # Delete the per-backup timestamp directory on the stream target.
                 # This holds image.tar (and nothing else for restic mode) and is
-                # separate from the restic repo folder — it was previously never
-                # removed, leaving image.tar behind on every delete.
+                # separate from the restic repo folder.
+                _bg_logger.info("Lösche Timestamp-Verzeichnis auf Stream-Ziel '%s': %s", t["name"], rel_key)
                 try:
-                    storage_sync.delete_from_target(t["type"], t["config_json"], _relative_key(rec_path))
+                    storage_sync.delete_from_target(t["type"], t["config_json"], rel_key)
+                    _bg_logger.info("Timestamp-Verzeichnis gelöscht: %s auf '%s'", rel_key, t["name"])
                 except Exception as exc:
-                    _bg_logger.debug("Timestamp-Verzeichnis auf Stream-Ziel nicht vorhanden oder bereits gelöscht: %s", exc)
+                    _bg_logger.warning(
+                        "Timestamp-Verzeichnis '%s' auf '%s' nicht gelöscht (möglicherweise nicht vorhanden): %s",
+                        rel_key, t["name"], exc,
+                    )
                 if task["is_last"]:
+                    _bg_logger.info("Letzter Record für '%s' — lösche Restic-Repo auf '%s'", task["name"], t["name"])
                     restic_engine.purge_restic_repo(task["name"], stream_target)
+                else:
+                    _bg_logger.info("Nicht letzter Record für '%s' — Restic-Repo bleibt erhalten", task["name"])
             else:
-                # Old tar-stream backup: delete the remote directory
-                storage_sync.delete_from_target(t["type"], t["config_json"], _relative_key(rec_path))
+                # Old tar-stream or non-restic stream: delete the whole remote directory
+                _bg_logger.info("Lösche Stream-Verzeichnis auf '%s': %s", t["name"], rel_key)
+                storage_sync.delete_from_target(t["type"], t["config_json"], rel_key)
+                _bg_logger.info("Stream-Verzeichnis gelöscht: %s auf '%s'", rel_key, t["name"])
         except Exception as exc:
+            _bg_logger.warning("Remote-Bereinigung Stream '%s' fehlgeschlagen: %s", t["name"], exc)
             errors.append(f"{t['name']}: {exc}")
 
+    _bg_logger.info("Remote-Bereinigung abgeschlossen für '%s' (Fehler: %d)", task["name"], len(errors))
     return errors
 
 
