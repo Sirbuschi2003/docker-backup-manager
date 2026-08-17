@@ -730,6 +730,7 @@ async function backupsPage() {
           ${isLsc
             ? '<button class="btn primary members-btn">🗺️ Mitglieder &amp; Restore</button>'
             : '<button class="btn restore-btn">↩ Wiederherstellen</button>'}
+          <button class="btn download-btn">⬇ Download</button>
           <button class="btn danger delete-btn">Löschen</button>
         </td>
       </tr>`);
@@ -737,6 +738,15 @@ async function backupsPage() {
       if (restoreBtn) restoreBtn.addEventListener("click", () => openRestoreModal(v));
       const membersBtn = row.querySelector(".members-btn");
       if (membersBtn) membersBtn.addEventListener("click", () => openLandscapeMembersModal(v));
+      const downloadBtn = row.querySelector(".download-btn");
+      if (downloadBtn) downloadBtn.addEventListener("click", () => {
+        const a = document.createElement("a");
+        a.href = `/api/backups/${v.id}/download`;
+        a.download = "";
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+      });
       row.querySelector(".delete-btn").addEventListener("click", async (e) => {
         if (!confirm(`Backup vom ${fmtDate(v.created_at)} für "${name}" wirklich löschen?`)) return;
         const btn = e.currentTarget;

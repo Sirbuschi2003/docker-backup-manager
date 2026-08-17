@@ -723,7 +723,11 @@ def get_target_space_info(target_type: str, config_json: str) -> dict:
             smb_conf_path = restic_engine._write_smb_rclone_conf(config)
             try:
                 share = config["share"]
-                return _rclone_about(f"dbm_smb:{share}", smb_conf_path)
+                # rclone about only accepts the SMB share name (first path component).
+                # If the user stored a sub-path like "Backup_Clients\Lagerverwaltung",
+                # strip everything after the first separator.
+                top_share = share.replace("\\", "/").split("/")[0]
+                return _rclone_about(f"dbm_smb:{top_share}", smb_conf_path)
             finally:
                 Path(smb_conf_path).unlink(missing_ok=True)
         elif target_type == "rclone":

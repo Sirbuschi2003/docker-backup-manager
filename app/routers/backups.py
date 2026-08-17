@@ -1,10 +1,13 @@
 import json
+import os
+import tarfile
 import threading
 from datetime import timedelta
 from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -565,3 +568,43 @@ def landscape_members(backup_id: int, db: Session = Depends(get_db), user: User 
             })
 
     return {"members": result}
+
+
+@router.get("/{backup_id}/download")
+def download_backup(backup_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    record = db.query(BackupRecord).filter(BackupRecord.id == backup_id).first()
+    if not record:
+        raise HTTPException(404, "Backup nicht gefunden")
+    path = Path(record.path)
+    if not path.exists():
+        raise HTTPException(404, "Backup-Verzeichnis nicht gefunden")
+
+    safe_name = "".join(c if c.isalnum() or c in "-_." else "_" for c in record.name)
+    archive_name = f"{safe_name}_{path.name}.tar.gz"
+
+    def generate():
+        r_fd, w_fd = os.pipe()
+
+        def write_archive():
+            try:
+                with os.fdopen(w_fd, "wb") as sink:
+                    with tarfile.open(fileobj=sink, mode="w|gz") as tar:
+                        tar.add(str(path), arcname=path.name)
+            except Exception:
+                try:
+                    os.close(w_fd)
+                except OSError:
+                    pass
+
+        t = threading.Thread(target=write_archive, daemon=True)
+        t.start()
+        with os.fdopen(r_fd, "rb") as source:
+            while chunk := source.read(65536):
+                yield chunk
+        t.join()
+
+    return StreamingResponse(
+        generate(),
+        media_type="application/gzip",
+        headers={"Content-Disposition": f'attachment; filename="{archive_name}"'},
+    )
