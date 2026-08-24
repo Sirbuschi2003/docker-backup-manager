@@ -332,6 +332,7 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
     restic_env: dict = {}
     restic_smb_conf: Optional[str] = None
     restic_snapshot_ids: dict = {}
+    restic_password: str = ""
 
     if use_restic:
         try:
@@ -355,6 +356,23 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
                 except Exception:
                     pass
                 restic_smb_conf = None
+
+    def _cleanup_remote_partial() -> None:
+        """Remove any data already uploaded to the remote target for this failed run."""
+        if use_restic and restic_snapshot_ids and restic_repo_url and restic_password:
+            # Forget each partial snapshot so the restic repo doesn't accumulate orphaned data.
+            for sid in restic_snapshot_ids.values():
+                try:
+                    restic_engine.forget_snapshot(restic_repo_url, restic_env, restic_password, sid)
+                except Exception:
+                    logger.exception("Partial restic snapshot cleanup failed for %s (snapshot %s)", name, sid)
+        elif stream_target and not use_restic:
+            # Plain-stream upload: delete the partial container dir from the remote target.
+            try:
+                t_type, t_cfg, _ = stream_target
+                storage_sync.delete_from_target(t_type, t_cfg, f"{sanitize_name(name)}/{ts}")
+            except Exception:
+                logger.exception("Partial remote dir cleanup failed for %s", name)
 
     try:
         _check_cancel(should_cancel, "before start")
@@ -543,12 +561,12 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
     except BackupCancelled as exc:
         _log(f"Backup abgebrochen: {exc}")
         shutil.rmtree(backup_dir, ignore_errors=True)
+        _cleanup_remote_partial()
         return BackupResult(ok=False, name=name, path=backup_dir, error=str(exc), cancelled=True)
     except Exception as exc:  # noqa: BLE001
-        # Don't leave a half-written backup directory (partial image.tar, etc.) behind -
-        # it would be unusable but still count toward disk usage forever, since a
-        # failed BackupResult has no size_bytes and isn't retention-eligible either.
+        # Don't leave a half-written backup directory (partial image.tar, etc.) behind.
         shutil.rmtree(backup_dir, ignore_errors=True)
+        _cleanup_remote_partial()
         return BackupResult(ok=False, name=name, path=backup_dir, error=str(exc))
     finally:
         # No matter how we leave this function (cancelled mid-volume, a volume
