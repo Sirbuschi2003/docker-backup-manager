@@ -14,7 +14,7 @@ _client = None
 def get_client() -> docker.DockerClient:
     global _client
     if _client is None:
-        _client = docker.from_env()
+        _client = docker.from_env(timeout=300)
     return _client
 
 
