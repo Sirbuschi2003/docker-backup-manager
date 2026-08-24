@@ -599,6 +599,8 @@ def backup_landscape(dest_root: Path = BACKUPS_DIR, project_filter: Optional[str
                       on_bytes: BytesCallback = None,
                       on_upload_bytes: BytesCallback = None,
                       on_log: LogCallback = None) -> BackupResult:
+    # list_landscape_containers may raise (e.g. Docker socket timeout) — landscape_dir
+    # must NOT be created before this call so there is nothing to clean up on failure.
     containers = list_landscape_containers(project_filter, name_contains, exclude_names)
     ts = _timestamp()
     landscape_name = label or project_filter or name_contains or "landscape"
@@ -610,49 +612,61 @@ def backup_landscape(dest_root: Path = BACKUPS_DIR, project_filter: Optional[str
     errors = []
     cancelled = False
     total = max(len(containers), 1)
-    for idx, c in enumerate(containers, start=1):
-        if should_cancel():
-            cancelled = True
-            break
-        on_progress(idx, f"Backing up {c.name} ({idx}/{total})", total)
-        result = backup_container(c.name, dest_root, stream_target=stream_target, should_cancel=should_cancel,
-                                   stop_container=stop_containers, on_bytes=on_bytes,
-                                   on_upload_bytes=on_upload_bytes, on_log=on_log)
-        member_names.append(result.name)
-        member_results.append(result)
-        if result.cancelled:
-            cancelled = True
-            break
-        if not result.ok:
-            errors.append(f"{result.name}: {result.error}")
-        else:
-            (landscape_dir / (result.name + ".json")).write_text(json.dumps({
-                "container_name": result.name,
-                "backup_path": str(result.path),
-            }))
+    try:
+        for idx, c in enumerate(containers, start=1):
+            if should_cancel():
+                cancelled = True
+                break
+            on_progress(idx, f"Backing up {c.name} ({idx}/{total})", total)
+            result = backup_container(c.name, dest_root, stream_target=stream_target, should_cancel=should_cancel,
+                                       stop_container=stop_containers, on_bytes=on_bytes,
+                                       on_upload_bytes=on_upload_bytes, on_log=on_log)
+            member_names.append(result.name)
+            member_results.append(result)
+            if result.cancelled:
+                cancelled = True
+                break
+            if not result.ok:
+                errors.append(f"{result.name}: {result.error}")
+                # Remove the partial member dir so it doesn't leave data garbage on disk.
+                # backup_container() already does shutil.rmtree on its own dir when it
+                # fails — this is a belt-and-suspenders guard for any edge case where
+                # the dir was created but not cleaned up.
+                if result.path and result.path.exists():
+                    shutil.rmtree(result.path, ignore_errors=True)
+            else:
+                (landscape_dir / (result.name + ".json")).write_text(json.dumps({
+                    "container_name": result.name,
+                    "backup_path": str(result.path),
+                }))
 
-    meta = {
-        "format_version": APP_BACKUP_FORMAT_VERSION,
-        "backup_type": "landscape",
-        "label": landscape_name,
-        "members": member_names,
-        "created_at": datetime.datetime.utcnow().isoformat() + "Z",
-        "errors": errors,
-    }
-    (landscape_dir / "meta.json").write_text(json.dumps(meta, indent=2))
+        meta = {
+            "format_version": APP_BACKUP_FORMAT_VERSION,
+            "backup_type": "landscape",
+            "label": landscape_name,
+            "members": member_names,
+            "created_at": datetime.datetime.utcnow().isoformat() + "Z",
+            "errors": errors,
+        }
+        (landscape_dir / "meta.json").write_text(json.dumps(meta, indent=2))
 
-    if not cancelled and encryption.is_enabled():
-        encryption.encrypt_directory_in_place(landscape_dir)
+        if not cancelled and encryption.is_enabled():
+            encryption.encrypt_directory_in_place(landscape_dir)
 
-    size = dir_size_bytes(landscape_dir)
-    ok = len(errors) == 0 and not cancelled
-    return BackupResult(
-        ok=ok, name=landscape_name, path=landscape_dir, size_bytes=size,
-        error="Backup abgebrochen" if cancelled else ("; ".join(errors) if errors else None),
-        containers=member_names, member_results=member_results,
-        streamed_target_id=stream_target[2] if stream_target else None,
-        cancelled=cancelled,
-    )
+        size = dir_size_bytes(landscape_dir)
+        ok = len(errors) == 0 and not cancelled
+        return BackupResult(
+            ok=ok, name=landscape_name, path=landscape_dir, size_bytes=size,
+            error="Backup abgebrochen" if cancelled else ("; ".join(errors) if errors else None),
+            containers=member_names, member_results=member_results,
+            streamed_target_id=stream_target[2] if stream_target else None,
+            cancelled=cancelled,
+        )
+    except Exception:
+        # Unexpected exception after landscape_dir was already created — clean up
+        # so no orphaned directory is left on disk without a DB record.
+        shutil.rmtree(landscape_dir, ignore_errors=True)
+        raise
 
 
 def delete_backup(path: Path) -> None:
