@@ -520,56 +520,84 @@ def landscape_members(backup_id: int, db: Session = Depends(get_db), user: User 
     BackupRecord from the SAME run (not just the most-recent one).
     The landscape directory contains per-member JSON files with the exact
     backup_path, which we use to look up the matching record."""
+    import tempfile
+
     record = db.query(BackupRecord).filter(BackupRecord.id == backup_id).first()
     if not record or record.backup_type != "landscape":
         raise HTTPException(404, "Landscape backup not found")
 
-    member_jsons = _read_member_jsons(Path(record.path))
-    result = []
+    landscape_dir = Path(record.path)
+    member_jsons = _read_member_jsons(landscape_dir)
 
-    if member_jsons:
-        # New format: per-member JSON files with exact backup_path
-        for d in member_jsons:
-            container_name = d.get("container_name", "")
-            backup_path = d.get("backup_path", "")
-            candidate = (
-                db.query(BackupRecord)
-                .filter(BackupRecord.path == backup_path, BackupRecord.name == container_name)
-                .first()
-            )
-            if not candidate and container_name:
-                # Path mismatch fallback: pick most-recent container record by name
+    # For catalog-imported landscapes: local dir is absent but the landscape dir
+    # (with per-member JSON files) still exists on the remote target. Download it
+    # to a temp dir so we can read the member JSON files directly — this is more
+    # reliable than containers_json, which may be empty for older imports.
+    tmp_ctx = None
+    if not member_jsons and not landscape_dir.exists() and record.streamed_target_id:
+        target = db.query(StorageTarget).filter(StorageTarget.id == record.streamed_target_id).first()
+        if target:
+            tmp_ctx = tempfile.TemporaryDirectory()
+            try:
+                storage_sync.download_full_backup_from_target(
+                    target.type, target.config_json,
+                    _relative_key(landscape_dir),
+                    Path(tmp_ctx.name),
+                )
+                member_jsons = _read_member_jsons(Path(tmp_ctx.name))
+            except Exception:
+                pass  # fall back to containers_json
+
+    result = []
+    try:
+        if member_jsons:
+            # Per-member JSON files with exact backup_path
+            for d in member_jsons:
+                container_name = d.get("container_name", "")
+                backup_path = d.get("backup_path", "")
                 candidate = (
                     db.query(BackupRecord)
-                    .filter(BackupRecord.name == container_name, BackupRecord.backup_type == "container")
+                    .filter(BackupRecord.path == backup_path, BackupRecord.name == container_name)
+                    .first()
+                )
+                if not candidate and container_name:
+                    # Path mismatch fallback (e.g. different BACKUPS_DIR on second instance):
+                    # pick most-recent container record with this name
+                    candidate = (
+                        db.query(BackupRecord)
+                        .filter(BackupRecord.name == container_name, BackupRecord.backup_type == "container")
+                        .order_by(BackupRecord.created_at.desc())
+                        .first()
+                    )
+                if container_name:
+                    result.append({
+                        "container_name": container_name,
+                        "backup_id": candidate.id if candidate else None,
+                        "created_at": candidate.created_at.isoformat() + "Z" if candidate else None,
+                        "status": candidate.status if candidate else None,
+                        "size_bytes": candidate.size_bytes if candidate else None,
+                    })
+        else:
+            # Last-resort fallback: containers_json name list (old backup format or
+            # landscapes where member JSON files could not be retrieved from remote)
+            members = json.loads(record.containers_json) if record.containers_json else []
+            for member_name in members:
+                candidate = (
+                    db.query(BackupRecord)
+                    .filter(BackupRecord.name == member_name, BackupRecord.backup_type == "container")
                     .order_by(BackupRecord.created_at.desc())
                     .first()
                 )
-            if container_name:
                 result.append({
-                    "container_name": container_name,
+                    "container_name": member_name,
                     "backup_id": candidate.id if candidate else None,
                     "created_at": candidate.created_at.isoformat() + "Z" if candidate else None,
                     "status": candidate.status if candidate else None,
                     "size_bytes": candidate.size_bytes if candidate else None,
                 })
-    else:
-        # Fallback: containers_json name list (old backup format)
-        members = json.loads(record.containers_json) if record.containers_json else []
-        for member_name in members:
-            candidate = (
-                db.query(BackupRecord)
-                .filter(BackupRecord.name == member_name, BackupRecord.backup_type == "container")
-                .order_by(BackupRecord.created_at.desc())
-                .first()
-            )
-            result.append({
-                "container_name": member_name,
-                "backup_id": candidate.id if candidate else None,
-                "created_at": candidate.created_at.isoformat() + "Z" if candidate else None,
-                "status": candidate.status if candidate else None,
-                "size_bytes": candidate.size_bytes if candidate else None,
-            })
+    finally:
+        if tmp_ctx:
+            tmp_ctx.cleanup()
 
     return {"members": result}
 
