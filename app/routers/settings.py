@@ -349,9 +349,11 @@ def import_catalog_from_target(target_id: int, db: Session = Depends(get_db), us
         if existing:
             skipped += 1
             continue
+        containers = entry.get("containers") or []
         db.add(BackupRecord(
             backup_type=entry["backup_type"], name=entry["name"], path=local_path, status="ok",
             size_bytes=entry["size_bytes"], streamed_target_id=target.id, created_at=entry["created_at"],
+            containers_json=json.dumps(containers) if containers else None,
         ))
         imported += 1
     db.commit()

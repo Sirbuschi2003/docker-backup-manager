@@ -859,10 +859,14 @@ def _list_backups_smb(config: dict) -> list[dict]:
 
     sizes_by_key: dict[str, int] = {}
     has_meta: set[str] = set()
+    containers_by_key: dict[str, list[str]] = {}
     for item in json.loads(proc.stdout or "[]"):
         parts = PurePosixPath(item["Path"]).parts
         if parts and parts[0] == "_landscapes" and len(parts) >= 4:
             backup_rel = "/".join(parts[:3])
+            # .json files directly inside the landscape dir (depth 4) are member-container markers
+            if len(parts) == 4 and parts[-1].endswith(".json") and parts[-1] not in _META_FILENAMES:
+                containers_by_key.setdefault(backup_rel, []).append(parts[-1][:-len(".json")])
         elif len(parts) >= 2:
             backup_rel = "/".join(parts[:2])
         else:
@@ -876,6 +880,7 @@ def _list_backups_smb(config: dict) -> list[dict]:
         parsed = _parse_backup_relative_dir(PurePosixPath(backup_rel))
         if parsed:
             parsed["size_bytes"] = sizes_by_key.get(backup_rel, 0)
+            parsed["containers"] = containers_by_key.get(backup_rel, [])
             entries.append(parsed)
     return entries
 
@@ -895,10 +900,13 @@ def _list_backups_rclone(config: dict) -> list[dict]:
 
     sizes_by_key: dict[str, int] = {}
     has_meta: set[str] = set()
+    containers_by_key: dict[str, list[str]] = {}
     for item in json.loads(proc.stdout or "[]"):
         parts = PurePosixPath(item["Path"]).parts
         if parts and parts[0] == "_landscapes" and len(parts) >= 4:
             backup_rel = "/".join(parts[:3])
+            if len(parts) == 4 and parts[-1].endswith(".json") and parts[-1] not in _META_FILENAMES:
+                containers_by_key.setdefault(backup_rel, []).append(parts[-1][:-len(".json")])
         elif len(parts) >= 2:
             backup_rel = "/".join(parts[:2])
         else:
@@ -912,6 +920,7 @@ def _list_backups_rclone(config: dict) -> list[dict]:
         parsed = _parse_backup_relative_dir(PurePosixPath(backup_rel))
         if parsed:
             parsed["size_bytes"] = sizes_by_key.get(backup_rel, 0)
+            parsed["containers"] = containers_by_key.get(backup_rel, [])
             entries.append(parsed)
     return entries
 
