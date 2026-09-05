@@ -110,15 +110,22 @@ def run_schedule(schedule_id: int):
                 # stream_target so it always has a meta.json for catalog discovery.
                 if stream_target:
                     st_type, st_config_json, st_id = stream_target
+                    # When stream_target is not also a regular storage target, the
+                    # result dir was never uploaded there — do it now for catalog discovery.
                     if st_id not in target_ids:
-                        # Sync landscape dir + each member's backup dir to the stream target
-                        meta_paths = [result.path]
-                        meta_paths += [m.path for m in result.member_results if m.ok and m.path and m.path.exists()]
-                        for meta_path in meta_paths:
+                        try:
+                            storage_sync.sync_to_target(result.path, st_type, st_config_json)
+                        except Exception:
+                            logger.exception("Meta-sync result dir to stream target failed for %s", result.path)
+                    # Member dirs must ALWAYS go to the stream target — sync_to_selected_targets
+                    # only uploads result.path (the landscape dir), never the individual member
+                    # backup dirs. Without their meta.json the catalog scan finds 0 containers.
+                    for m in result.member_results:
+                        if m.ok and m.path and m.path.exists():
                             try:
-                                storage_sync.sync_to_target(meta_path, st_type, st_config_json)
+                                storage_sync.sync_to_target(m.path, st_type, st_config_json)
                             except Exception:
-                                logger.exception("Meta-sync to stream target failed for %s", meta_path)
+                                logger.exception("Meta-sync member dir to stream target failed for %s", m.path)
 
                 record.synced_target_ids = json.dumps([r["target_id"] for r in sync_results if r["ok"]])
                 db.commit()
