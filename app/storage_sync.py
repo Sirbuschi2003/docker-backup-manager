@@ -980,18 +980,33 @@ def _download_full_s3(config: dict, relative_key: str, dest_dir: Path) -> None:
 
 
 def _download_full_smb(config: dict, relative_key: str, dest_dir: Path) -> None:
-    import smbclient
+    # rclone-based implementation — replaces the old smbclient.walk() version
+    # which blocked indefinitely on certain SMB servers (same issue as _list_backups_smb).
+    from app import restic_engine as _re
 
-    _smb_register_session(config)
-    remote_root = _smb_remote_root(config, relative_key)
-    for dirpath, _dirnames, filenames in smbclient.walk(remote_root):
-        rel_dir = dirpath[len(remote_root):].strip("\\") if dirpath.startswith(remote_root) else ""
-        for filename in filenames:
-            remote_file = f"{dirpath}\\{filename}"
-            dest_file = (dest_dir / rel_dir / filename) if rel_dir else (dest_dir / filename)
-            dest_file.parent.mkdir(parents=True, exist_ok=True)
-            with smbclient.open_file(remote_file, mode="rb", buffering=_SMB_IO_BUFFER_SIZE) as src, open(dest_file, "wb") as dst:
-                shutil.copyfileobj(src, dst, length=_SMB_IO_BUFFER_SIZE)
+    smb_conf_path = _re._write_smb_rclone_conf(config)
+    try:
+        share = config["share"]
+        base = config.get("base_path", "").strip("/\\").replace("\\", "/")
+        top_share = share.replace("\\", "/").split("/")[0]
+        sub_parts = [p for p in [
+            share.replace("\\", "/").split("/", 1)[1] if "/" in share.replace("\\", "/") else "",
+            base,
+            relative_key.replace("\\", "/"),
+        ] if p]
+        sub = "/".join(sub_parts)
+        src = f"dbm_smb:{top_share}/{sub}" if sub else f"dbm_smb:{top_share}"
+        proc = subprocess.run(
+            ["rclone", "copy", src, str(dest_dir), "--config", smb_conf_path],
+            capture_output=True, text=True, timeout=300,
+        )
+    finally:
+        try:
+            Path(smb_conf_path).unlink(missing_ok=True)
+        except Exception:
+            pass
+    if proc.returncode != 0:
+        raise RuntimeError(f"rclone copy (SMB) fehlgeschlagen: {(proc.stderr or proc.stdout or '').strip()}")
 
 
 def _download_full_rclone(config: dict, relative_key: str, dest_dir: Path) -> None:
