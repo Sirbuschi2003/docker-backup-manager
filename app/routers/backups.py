@@ -32,7 +32,10 @@ def list_backups(db: Session = Depends(get_db), user: User = Depends(get_current
     # drop it rather than showing a version that can never actually be
     # restored or re-deleted. Failed backups intentionally have no directory
     # (the partial data is cleaned up right away), so those are left alone.
-    stale = [r for r in records if r.status == "ok" and not Path(r.path).exists()]
+    # Catalog-imported backups (streamed_target_id set, local path absent) are
+    # intentionally remote-only — they must never be treated as stale.
+    stale = [r for r in records
+             if r.status == "ok" and not Path(r.path).exists() and r.streamed_target_id is None]
     if stale:
         for r in stale:
             db.delete(r)
