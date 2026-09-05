@@ -830,33 +830,46 @@ def _list_backups_s3(config: dict) -> list[dict]:
 
 
 def _list_backups_smb(config: dict) -> list[dict]:
-    import smbclient
+    # Use rclone lsjson instead of smbclient.walk() — the smbclient approach
+    # blocks indefinitely on large shares and has no usable timeout.
+    from app import restic_engine as _re
 
-    _smb_register_session(config)
-    root = _smb_remote_root(config, "")
-    if not smbclient.path.exists(root):
-        return []
+    smb_conf_path = _re._write_smb_rclone_conf(config)
+    try:
+        share = config["share"]
+        base = config.get("base_path", "").strip("/\\").replace("\\", "/")
+        top_share = share.replace("\\", "/").split("/")[0]
+        sub = "/".join(p for p in [share.replace("\\", "/").split("/", 1)[1] if "/" in share.replace("\\", "/") else "", base] if p)
+        src = f"dbm_smb:{top_share}/{sub}".rstrip("/") if sub else f"dbm_smb:{top_share}"
+        proc = subprocess.run(
+            ["rclone", "lsjson", src, "-R", "--files-only", "--config", smb_conf_path],
+            capture_output=True, text=True, timeout=300,
+        )
+    finally:
+        try:
+            Path(smb_conf_path).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "").strip()
+        if "directory not found" in err.lower() or "object not found" in err.lower():
+            return []
+        raise RuntimeError(f"rclone lsjson (SMB) fehlgeschlagen: {err}")
 
     sizes_by_key: dict[str, int] = {}
     has_meta: set[str] = set()
-    for dirpath, _dirnames, filenames in smbclient.walk(root):
-        rel_dir = dirpath[len(root):].strip("\\") if dirpath.startswith(root) else dirpath
-        for filename in filenames:
-            rel = f"{rel_dir}\\{filename}" if rel_dir else filename
-            parts = tuple(p for p in rel.replace("\\", "/").split("/") if p)
-            if len(parts) >= 4 and parts[0] == "_landscapes":
-                backup_rel = "/".join(parts[:3])
-            elif len(parts) >= 2:
-                backup_rel = "/".join(parts[:2])
-            else:
-                continue
-            try:
-                size = smbclient.stat(f"{dirpath}\\{filename}").st_size
-            except Exception:  # noqa: BLE001
-                size = 0
-            sizes_by_key[backup_rel] = sizes_by_key.get(backup_rel, 0) + size
-            if filename in _META_FILENAMES:
-                has_meta.add(backup_rel)
+    for item in json.loads(proc.stdout or "[]"):
+        parts = PurePosixPath(item["Path"]).parts
+        if parts and parts[0] == "_landscapes" and len(parts) >= 4:
+            backup_rel = "/".join(parts[:3])
+        elif len(parts) >= 2:
+            backup_rel = "/".join(parts[:2])
+        else:
+            continue
+        sizes_by_key[backup_rel] = sizes_by_key.get(backup_rel, 0) + item.get("Size", 0)
+        if parts[-1] in _META_FILENAMES:
+            has_meta.add(backup_rel)
 
     entries = []
     for backup_rel in has_meta:
