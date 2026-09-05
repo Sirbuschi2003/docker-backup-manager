@@ -467,11 +467,12 @@ class RestorePayload(BaseModel):
     start: bool = True
     rename_volumes: bool = True
     volume_base_dir: Optional[str] = None
+    overwrite: bool = False
 
 
 def _run_restore_job(job_id: str, backup_path: str, new_name: Optional[str], start: bool,
                       stream_target: Optional[tuple], rename_volumes: bool = True,
-                      volume_base_dir: Optional[str] = None):
+                      volume_base_dir: Optional[str] = None, overwrite: bool = False):
     label = new_name or Path(backup_path).parent.name
     event_log.log_event("restore", f"Restore von '{label}' gestartet")
     try:
@@ -480,7 +481,7 @@ def _run_restore_job(job_id: str, backup_path: str, new_name: Optional[str], sta
 
         restore_container(Path(backup_path), new_name=new_name, start=start, on_progress=progress,
                            stream_target=stream_target, rename_volumes=rename_volumes,
-                           volume_base_dir=volume_base_dir)
+                           volume_base_dir=volume_base_dir, overwrite=overwrite)
         job_tracker.finish_job(job_id, True)
         event_log.log_event("restore", f"Restore von '{label}' erfolgreich abgeschlossen")
     except Exception as exc:  # noqa: BLE001
@@ -503,7 +504,7 @@ def restore_backup(backup_id: int, payload: RestorePayload, db: Session = Depend
     thread = threading.Thread(
         target=_run_restore_job,
         args=(job.id, record.path, payload.new_name, payload.start, stream_target,
-              payload.rename_volumes, payload.volume_base_dir),
+              payload.rename_volumes, payload.volume_base_dir, payload.overwrite),
         daemon=True,
     )
     thread.start()

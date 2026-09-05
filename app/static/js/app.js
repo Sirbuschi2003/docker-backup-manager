@@ -820,6 +820,7 @@ function openRestoreModal(version) {
           rename_volumes: renameVolumes,
           volume_base_dir: volumeBaseDir || null,
           start,
+          overwrite: !newName,
         }),
       });
       toast("Wiederherstellung gestartet");
@@ -905,7 +906,7 @@ async function openLandscapeMembersModal(version) {
         const newName = prefix ? `${prefix}${m.container_name}` : null;
         await api(`/api/backups/${m.backup_id}/restore`, {
           method: "POST",
-          body: JSON.stringify({ new_name: newName, start }),
+          body: JSON.stringify({ new_name: newName, start, overwrite: mode === "replace" }),
         });
         started++;
       } catch (e) { toast(`${m.container_name}: ${e.message}`, "error"); }

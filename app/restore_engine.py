@@ -84,7 +84,8 @@ def restore_container(backup_dir: Path, new_name: Optional[str] = None, start: b
                        on_progress: ProgressCallback = _noop_progress,
                        stream_target: Optional[StreamTarget] = None,
                        rename_volumes: bool = True,
-                       volume_base_dir: Optional[str] = None):
+                       volume_base_dir: Optional[str] = None,
+                       overwrite: bool = False):
     backup_dir = Path(backup_dir)
     relative_key = storage_sync._relative_key(backup_dir)
 
@@ -98,6 +99,21 @@ def restore_container(backup_dir: Path, new_name: Optional[str] = None, start: b
         on_progress(0, "Lade Backup vom Speicherziel herunter", 1)
         target_type, target_config_json, _target_id = stream_target
         storage_sync.download_full_backup_from_target(target_type, target_config_json, relative_key, backup_dir)
+
+    if overwrite:
+        client = get_client()
+        target_name = new_name or (
+            json.loads((backup_dir / "container.json").read_text()).get("Name", "").lstrip("/")
+            if (backup_dir / "container.json").exists() else None
+        )
+        if target_name:
+            try:
+                existing = client.containers.get(target_name)
+                if existing.status == "running":
+                    existing.stop(timeout=10)
+                existing.remove()
+            except Exception:
+                pass  # container doesn't exist or already gone
 
     if encryption.is_backup_encrypted(backup_dir):
         on_progress(0, "Decrypting backup", 1)
