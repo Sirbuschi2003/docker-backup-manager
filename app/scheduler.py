@@ -101,6 +101,25 @@ def run_schedule(schedule_id: int):
 
                 target_ids = json.loads(sched.storage_target_ids or "[]")
                 sync_results = storage_sync.sync_to_selected_targets(result.path, target_ids, on_progress=upload_progress)
+
+                # When volumes are streamed via restic to a stream_target, the local
+                # backup_dir only holds meta.json / container.json / networks.json — these
+                # are never part of the restic repo, so the stream_target ends up without
+                # a meta.json marker. Without that marker the catalog-import scan finds
+                # nothing on that target. Fix: also sync the metadata dir(s) to the
+                # stream_target so it always has a meta.json for catalog discovery.
+                if stream_target:
+                    st_type, st_config_json, st_id = stream_target
+                    if st_id not in target_ids:
+                        # Sync landscape dir + each member's backup dir to the stream target
+                        meta_paths = [result.path]
+                        meta_paths += [m.path for m in result.member_results if m.ok and m.path and m.path.exists()]
+                        for meta_path in meta_paths:
+                            try:
+                                storage_sync.sync_to_target(meta_path, st_type, st_config_json)
+                            except Exception:
+                                logger.exception("Meta-sync to stream target failed for %s", meta_path)
+
                 record.synced_target_ids = json.dumps([r["target_id"] for r in sync_results if r["ok"]])
                 db.commit()
 
