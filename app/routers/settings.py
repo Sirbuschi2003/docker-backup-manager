@@ -343,13 +343,21 @@ def import_catalog_from_target(target_id: int, db: Session = Depends(get_db), us
 
     imported = 0
     skipped = 0
+    updated = 0
     for entry in found:
         local_path = str(BACKUPS_DIR / entry["relative_key"])
         existing = db.query(BackupRecord).filter(BackupRecord.path == local_path).first()
-        if existing:
-            skipped += 1
-            continue
         containers = entry.get("containers") or []
+        if existing:
+            # Update containers_json on landscape records that were imported before
+            # this field was populated — a re-import should not leave them broken.
+            if (existing.backup_type == "landscape" and not existing.containers_json
+                    and containers):
+                existing.containers_json = json.dumps(containers)
+                updated += 1
+            else:
+                skipped += 1
+            continue
         db.add(BackupRecord(
             backup_type=entry["backup_type"], name=entry["name"], path=local_path, status="ok",
             size_bytes=entry["size_bytes"], streamed_target_id=target.id, created_at=entry["created_at"],
@@ -357,7 +365,7 @@ def import_catalog_from_target(target_id: int, db: Session = Depends(get_db), us
         ))
         imported += 1
     db.commit()
-    return {"imported": imported, "skipped": skipped, "found": len(found)}
+    return {"imported": imported, "skipped": skipped, "updated": updated, "found": len(found)}
 
 
 # ---------- Google Drive / OneDrive OAuth ----------
