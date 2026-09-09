@@ -452,7 +452,9 @@ def backup_volume_from_stream(
 
 def _delete_repo_folder(repo_url: str, env: dict) -> None:
     """Löscht den gesamten Restic-Repo-Ordner auf dem Speicherziel.
-    Wird aufgerufen wenn das Repo leer ist (keine Snapshots mehr übrig)."""
+    Wird aufgerufen wenn das Repo leer ist (keine Snapshots mehr übrig).
+    Wirft RuntimeError bei echten Fehlern; gibt None zurück wenn der Ordner
+    nicht existiert (kein Fehler — schon weg)."""
     if repo_url.startswith("rclone:"):
         # "rclone:remote:path" → rclone erwartet "remote:path"
         rclone_target = repo_url[len("rclone:"):]
@@ -463,9 +465,12 @@ def _delete_repo_folder(repo_url: str, env: dict) -> None:
             timeout=120,
         )
         if result.returncode != 0:
-            raise RuntimeError(
-                f"rclone purge fehlgeschlagen: {result.stderr.decode(errors='replace').strip()}"
-            )
+            stderr = result.stderr.decode(errors="replace").strip()
+            # rclone exits with non-zero when the path doesn't exist — that's OK
+            if "directory not found" in stderr.lower() or "object not found" in stderr.lower() or "not found" in stderr.lower():
+                logger.info("Restic-Repo-Ordner nicht vorhanden (bereits gelöscht): %s", rclone_target)
+                return
+            raise RuntimeError(f"rclone purge fehlgeschlagen: {stderr}")
         logger.info("Restic-Repo-Ordner gelöscht: %s", rclone_target)
     elif not repo_url.startswith("s3:"):
         # Lokaler Pfad
@@ -565,7 +570,9 @@ def cleanup_restic_repo_for_container(
 def purge_restic_repo(container_name: str, stream_target: tuple) -> None:
     """Löscht den gesamten Restic-Repo-Ordner für einen Container — auch wenn
     noch Snapshots darin sind (z.B. orphaned Daten aus fehlgeschlagenen Backups).
-    Nur aufrufen wenn keine weiteren Backup-Records für diesen Container existieren."""
+    Nur aufrufen wenn keine weiteren Backup-Records für diesen Container existieren.
+    Wirft bei echten Fehlern (Verbindungsprobleme, Rechtefehler) eine Exception
+    damit der Aufrufer weiß dass Daten möglicherweise noch auf dem Ziel verbleiben."""
     if not container_name or stream_target is None:
         return
     target_type, target_config_json, _tid = stream_target
@@ -574,9 +581,6 @@ def purge_restic_repo(container_name: str, stream_target: tuple) -> None:
     try:
         _delete_repo_folder(repo_url, env)
         logger.info("Restic-Repo für '%s' vollständig gelöscht", container_name)
-    except Exception as exc:
-        # Nicht vorhanden oder schon gelöscht - kein Problem
-        logger.info("Restic-Repo-Ordner für '%s' nicht vorhanden oder bereits gelöscht: %s", container_name, exc)
     finally:
         if smb_conf_path:
             try:
