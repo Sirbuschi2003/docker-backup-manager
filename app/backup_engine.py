@@ -543,6 +543,7 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
             meta["restic_repo_url"] = restic_repo_url
             meta["restic_snapshot_ids"] = restic_snapshot_ids
             meta["restic_data_bytes"] = restic_data_bytes
+            meta["restic_password"] = restic_password
         (backup_dir / "meta.json").write_text(json.dumps(meta, indent=2))
 
         if encrypt:

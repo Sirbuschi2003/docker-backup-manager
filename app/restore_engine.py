@@ -177,7 +177,10 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
             target_config = json.loads(target_config_json)
             container_name = meta.get("container_name", "")
             snapshot_ids: dict = meta.get("restic_snapshot_ids", {})
-            password = restic_engine.get_password()
+            # Prefer the password stored in meta.json (written at backup time)
+            # so cross-machine restores work even when the local restic password
+            # differs from the one used when the backup was created.
+            password = meta.get("restic_password") or restic_engine.get_password()
             # Recompute the repo URL from the CURRENT target's config so restores
             # work cross-machine even when the source and restore machines have
             # different SMB share names / base paths.
@@ -322,7 +325,17 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
                         f"einen anderen Pfad."
                     ) from exc
 
-    container = client.containers.create(**create_kwargs)
+    try:
+        container = client.containers.create(**create_kwargs)
+    except Exception as exc:
+        msg = str(exc)
+        if "Conflict" in msg or "already in use" in msg:
+            cname = create_kwargs.get("name", "")
+            raise RuntimeError(
+                f"Container '{cname}' existiert bereits auf diesem System. "
+                f"Aktiviere die Option 'Vorhandenen Container überschreiben' und starte den Restore erneut."
+            ) from exc
+        raise
 
     for net_name in networks_json.keys():
         try:
