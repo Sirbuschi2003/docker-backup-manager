@@ -235,7 +235,15 @@ def _run_remote_cleanup(task: dict) -> list[str]:
                                 restic_engine.forget_snapshot(repo_url, env, password, sid)
                                 _bg_logger.info("Snapshot %s vergessen (%s/%s)", sid[:8], task["name"], key)
                             except Exception as exc:
-                                _bg_logger.warning("forget_snapshot %s fehlgeschlagen: %s", sid[:8], exc)
+                                msg = str(exc)
+                                if "does not exist" in msg and "config" in msg:
+                                    # Restic repo already gone — nothing to forget, skip silently
+                                    _bg_logger.info(
+                                        "Snapshot %s übersprungen — Restic-Repo existiert nicht mehr (%s/%s)",
+                                        sid[:8], task["name"], key,
+                                    )
+                                else:
+                                    _bg_logger.warning("forget_snapshot %s fehlgeschlagen: %s", sid[:8], exc)
                     finally:
                         if smb_conf_path:
                             try:
