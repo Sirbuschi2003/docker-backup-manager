@@ -127,11 +127,10 @@ def restore_container(backup_dir: Path, new_name: Optional[str] = None, start: b
         if target_name:
             try:
                 existing = client.containers.get(target_name)
-                if existing.status == "running":
-                    existing.stop(timeout=10)
-                existing.remove()
-            except Exception:
-                pass  # container doesn't exist or already gone
+                existing.remove(force=True)
+            except Exception as _rm_exc:
+                if "No such container" not in str(_rm_exc) and "404" not in str(_rm_exc):
+                    logger.warning("Konnte vorhandenen Container '%s' nicht entfernen: %s", target_name, _rm_exc)
 
     if encryption.is_backup_encrypted(backup_dir):
         on_progress(0, "Decrypting backup", 1)
