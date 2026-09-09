@@ -14,14 +14,32 @@ adjustment after restore.
 from __future__ import annotations
 
 import json
+import logging
 import tempfile
 from pathlib import Path
 from typing import Callable, Optional
 
 from app import encryption, restic_engine, storage_sync
+
+logger = logging.getLogger("dbm.restore")
 from app.backup_engine import ProgressCallback, StreamTarget, _noop_progress, restore_volume_from_file, restore_volume_from_tar, sanitize_name
 from app.config import BACKUPS_DIR
 from app.docker_client import get_client
+
+
+def _remap_bind_path(original: str, fallback_base: str = "/opt/docker") -> str:
+    """Return a writable fallback for a machine-specific bind-mount host path.
+
+    Strips the first path component (e.g. /volume1, /volume2) and any leading
+    'docker' segment so that /volume1/docker/myapp/data → /opt/docker/myapp/data.
+    """
+    parts = Path(original).parts  # ('/', 'volume1', 'docker', ...)
+    rest = list(parts[2:])        # drop '/' and first component
+    if rest and rest[0].lower() == "docker":
+        rest = rest[1:]
+    if not rest:
+        rest = [Path(original).name or "bind"]
+    return str(Path(fallback_base).joinpath(*rest))
 
 
 def _build_create_kwargs(container_json: dict, new_name: Optional[str], image_ref: str,
@@ -139,6 +157,31 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
     meta = json.loads((backup_dir / "meta.json").read_text()) if (backup_dir / "meta.json").exists() else {}
     streamed_target_id = meta.get("streamed_target_id")
     bind_mounts_meta = meta.get("bind_mounts", [])
+
+    # Remap bind-mount host paths that can't be created on this machine.
+    # Must happen before bind_files / create_kwargs are built so all downstream
+    # code uses the new paths consistently.
+    bind_path_remap: dict[str, str] = {}
+    for mount in container_json.get("Mounts", []):
+        if mount.get("Type") != "bind":
+            continue
+        src = mount["Source"]
+        if Path(src).exists():
+            continue
+        try:
+            Path(src).mkdir(parents=True, exist_ok=True)
+        except OSError:
+            remapped = _remap_bind_path(src)
+            logger.info(
+                "Bind-Mount-Pfad '%s' nicht erstellbar auf diesem System, "
+                "wird automatisch auf '%s' umgeleitet",
+                src, remapped,
+            )
+            bind_path_remap[src] = remapped
+            mount["Source"] = remapped
+    for bm in bind_mounts_meta:
+        if bm.get("source") in bind_path_remap:
+            bm["source"] = bind_path_remap[bm["source"]]
 
     # Build volume name map: original name → restored name (or host path for custom dir).
     # Used both when restoring data into volumes and when wiring up the container config.
@@ -308,22 +351,10 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
     on_progress(step, "Creating container", total_steps)
     create_kwargs = _build_create_kwargs(container_json, new_name, image_ref, volume_name_map)
 
-    # Pre-create bind-mount host directories that don't exist yet.
-    # Docker tries to create them itself, but fails with "read-only file system"
-    # when a parent directory doesn't exist on the restore target.
-    # We do it here to get a clear, actionable error message instead.
+    # Ensure all (possibly remapped) bind-mount source dirs exist.
     for mount in container_json.get("Mounts", []):
         if mount.get("Type") == "bind":
-            src = mount["Source"]
-            if not Path(src).exists():
-                try:
-                    Path(src).mkdir(parents=True, exist_ok=True)
-                except OSError as exc:
-                    raise RuntimeError(
-                        f"Bind-Mount-Verzeichnis '{src}' existiert nicht und konnte nicht erstellt werden: {exc}. "
-                        f"Bitte legen Sie das Verzeichnis manuell auf dem Restore-Ziel an oder verwenden Sie "
-                        f"einen anderen Pfad."
-                    ) from exc
+            Path(mount["Source"]).mkdir(parents=True, exist_ok=True)
 
     try:
         container = client.containers.create(**create_kwargs)
@@ -344,20 +375,6 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
             pass
 
     if start:
-        try:
-            container.start()
-        except Exception as exc:
-            msg = str(exc)
-            if "read-only file system" in msg or ("creating mount source path" in msg and "mkdir" in msg):
-                import re
-                path_match = re.search(r"'(/[^']+)'", msg)
-                bad_path = path_match.group(1) if path_match else "unbekannt"
-                raise RuntimeError(
-                    f"Container konnte nicht gestartet werden: Bind-Mount-Pfad '{bad_path}' existiert nicht "
-                    f"auf dem Ziel-Host und konnte nicht angelegt werden (kein Schreibrecht). "
-                    f"Erstelle den Pfad manuell auf dem Host-System und starte den Restore erneut:\n"
-                    f"  mkdir -p {bad_path}"
-                ) from exc
-            raise
+        container.start()
 
     return container
