@@ -344,6 +344,20 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
             pass
 
     if start:
-        container.start()
+        try:
+            container.start()
+        except Exception as exc:
+            msg = str(exc)
+            if "read-only file system" in msg or ("creating mount source path" in msg and "mkdir" in msg):
+                import re
+                path_match = re.search(r"'(/[^']+)'", msg)
+                bad_path = path_match.group(1) if path_match else "unbekannt"
+                raise RuntimeError(
+                    f"Container konnte nicht gestartet werden: Bind-Mount-Pfad '{bad_path}' existiert nicht "
+                    f"auf dem Ziel-Host und konnte nicht angelegt werden (kein Schreibrecht). "
+                    f"Erstelle den Pfad manuell auf dem Host-System und starte den Restore erneut:\n"
+                    f"  mkdir -p {bad_path}"
+                ) from exc
+            raise
 
     return container
