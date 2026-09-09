@@ -571,14 +571,19 @@ def landscape_members(backup_id: int, db: Session = Depends(get_db), user: User 
                     .first()
                 )
                 if not candidate and container_name:
-                    # Path mismatch fallback (e.g. different BACKUPS_DIR on second instance):
-                    # pick most-recent container record with this name
-                    candidate = (
-                        db.query(BackupRecord)
-                        .filter(BackupRecord.name == container_name, BackupRecord.backup_type == "container")
-                        .order_by(BackupRecord.created_at.desc())
-                        .first()
+                    # Path mismatch fallback (e.g. different BACKUPS_DIR on second instance).
+                    # Prefer a record from the same streamed_target_id (same catalog import
+                    # batch) over just picking the most-recent one by name.
+                    q = db.query(BackupRecord).filter(
+                        BackupRecord.name == container_name,
+                        BackupRecord.backup_type == "container",
                     )
+                    if record.streamed_target_id:
+                        candidate = q.filter(
+                            BackupRecord.streamed_target_id == record.streamed_target_id
+                        ).order_by(BackupRecord.created_at.desc()).first()
+                    if not candidate:
+                        candidate = q.order_by(BackupRecord.created_at.desc()).first()
                 if container_name:
                     result.append({
                         "container_name": container_name,
