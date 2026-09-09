@@ -302,6 +302,24 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
     step += 1
     on_progress(step, "Creating container", total_steps)
     create_kwargs = _build_create_kwargs(container_json, new_name, image_ref, volume_name_map)
+
+    # Pre-create bind-mount host directories that don't exist yet.
+    # Docker tries to create them itself, but fails with "read-only file system"
+    # when a parent directory doesn't exist on the restore target.
+    # We do it here to get a clear, actionable error message instead.
+    for mount in container_json.get("Mounts", []):
+        if mount.get("Type") == "bind":
+            src = mount["Source"]
+            if not Path(src).exists():
+                try:
+                    Path(src).mkdir(parents=True, exist_ok=True)
+                except OSError as exc:
+                    raise RuntimeError(
+                        f"Bind-Mount-Verzeichnis '{src}' existiert nicht und konnte nicht erstellt werden: {exc}. "
+                        f"Bitte legen Sie das Verzeichnis manuell auf dem Restore-Ziel an oder verwenden Sie "
+                        f"einen anderen Pfad."
+                    ) from exc
+
     container = client.containers.create(**create_kwargs)
 
     for net_name in networks_json.keys():

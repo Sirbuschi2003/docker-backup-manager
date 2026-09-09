@@ -53,6 +53,8 @@ def list_backups(db: Session = Depends(get_db), user: User = Depends(get_current
 
     grouped: dict[str, list] = {}
     for r in records:
+        if r.status == "failed":
+            continue
         entry: dict = {
             "id": r.id,
             "backup_type": r.backup_type,

@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app import encryption, oauth_storage, storage_sync
-from app.auth import get_current_user
+from app.auth import get_admin_user, get_current_user
 from app.config import APP_VERSION, BACKUPS_DIR, DEFAULT_RETENTION_COUNT, DEFAULT_RETENTION_DAYS, GITHUB_REPO, SESSION_MAX_AGE, TZ_ERROR, TZ_NAME
 from app.database import get_db
 from app.docker_client import is_available
@@ -143,7 +143,7 @@ def check_for_update(user: User = Depends(get_current_user)):
 
 
 @router.post("/apply-update")
-def apply_update(user: User = Depends(get_current_user)):
+def apply_update(user: User = Depends(get_admin_user)):
     """Download the latest GitHub release, stage it in /data/.app_update/,
     then restart the container. The entrypoint script applies the staged
     files before uvicorn starts on the next boot."""
@@ -174,7 +174,9 @@ def apply_update(user: User = Depends(get_current_user)):
                     rel = parts[1]  # strip the root directory prefix
                     if not (rel.startswith("app/") or rel == "requirements.txt"):
                         continue
-                    dest = update_stage / rel
+                    dest = (update_stage / rel).resolve()
+                    if not str(dest).startswith(str(update_stage.resolve())):
+                        continue  # skip path-traversal attempts
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     if member.isfile():
                         with tar.extractfile(member) as src, open(dest, "wb") as dst:
@@ -200,11 +202,17 @@ class StorageTargetPayload(BaseModel):
     enabled: bool = True
 
 
+_REDACT_FIELDS: dict[str, list[str]] = {
+    "smb": ["password"],
+    "s3": ["secret_key"],
+}
+
+
 def _target_config_for_response(target_type: str, config: dict) -> dict:
-    """The refresh_token grants ongoing account access (far more powerful than
-    a single backup share password) and is never needed by the frontend -
-    editing an OAuth target only touches name/folder_path, and reconnecting
-    fetches a fresh token via the OAuth flow rather than reusing the old one."""
+    config = dict(config)
+    for field in _REDACT_FIELDS.get(target_type, []):
+        if field in config:
+            config[field] = "***"
     if target_type in ("google_drive", "onedrive"):
         config = {**config, "connected": bool(config.get("refresh_token"))}
         config.pop("refresh_token", None)
@@ -212,7 +220,7 @@ def _target_config_for_response(target_type: str, config: dict) -> dict:
 
 
 @router.get("/storage-targets/{target_id}/space")
-def get_target_space(target_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def get_target_space(target_id: int, db: Session = Depends(get_db), user: User = Depends(get_admin_user)):
     """Returns free/used/total bytes for a storage target. Not all types are supported."""
     target = db.query(StorageTarget).filter(StorageTarget.id == target_id).first()
     if not target:
@@ -224,7 +232,7 @@ def get_target_space(target_id: int, db: Session = Depends(get_db), user: User =
 
 
 @router.get("/storage-targets")
-def list_targets(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def list_targets(db: Session = Depends(get_db), user: User = Depends(get_admin_user)):
     rows = db.query(StorageTarget).order_by(StorageTarget.created_at.desc()).all()
     return {"targets": [
         {
@@ -238,7 +246,7 @@ def list_targets(db: Session = Depends(get_db), user: User = Depends(get_current
 
 @router.post("/storage-targets")
 def create_target(payload: StorageTargetPayload, db: Session = Depends(get_db),
-                   user: User = Depends(get_current_user)):
+                   user: User = Depends(get_admin_user)):
     if payload.type not in ("local_path", "smb", "s3", "rclone", "google_drive", "onedrive"):
         raise HTTPException(400, "Invalid target type")
     target = StorageTarget(
@@ -252,7 +260,7 @@ def create_target(payload: StorageTargetPayload, db: Session = Depends(get_db),
 
 @router.put("/storage-targets/{target_id}")
 def update_target(target_id: int, payload: StorageTargetPayload, db: Session = Depends(get_db),
-                   user: User = Depends(get_current_user)):
+                   user: User = Depends(get_admin_user)):
     target = db.query(StorageTarget).filter(StorageTarget.id == target_id).first()
     if not target:
         raise HTTPException(404, "Storage target not found")
@@ -273,7 +281,7 @@ def update_target(target_id: int, payload: StorageTargetPayload, db: Session = D
 
 
 @router.delete("/storage-targets/{target_id}")
-def delete_target(target_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def delete_target(target_id: int, db: Session = Depends(get_db), user: User = Depends(get_admin_user)):
     target = db.query(StorageTarget).filter(StorageTarget.id == target_id).first()
     if not target:
         raise HTTPException(404, "Storage target not found")
@@ -288,7 +296,7 @@ class StorageTargetTestPayload(BaseModel):
 
 
 @router.post("/storage-targets/test")
-def test_storage_target_config(payload: StorageTargetTestPayload, user: User = Depends(get_current_user)):
+def test_storage_target_config(payload: StorageTargetTestPayload, user: User = Depends(get_admin_user)):
     """Tests connection settings before a target has been saved, so mistakes
     (wrong share name, bad credentials, ...) surface immediately in the dialog."""
     try:
@@ -307,7 +315,7 @@ class SmbSharesPayload(BaseModel):
 
 
 @router.post("/smb/shares")
-def list_smb_shares(payload: SmbSharesPayload, user: User = Depends(get_current_user)):
+def list_smb_shares(payload: SmbSharesPayload, user: User = Depends(get_admin_user)):
     try:
         shares = storage_sync.list_smb_shares(payload.model_dump())
         return {"shares": shares}
@@ -316,7 +324,7 @@ def list_smb_shares(payload: SmbSharesPayload, user: User = Depends(get_current_
 
 
 @router.post("/storage-targets/{target_id}/test")
-def test_storage_target(target_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def test_storage_target(target_id: int, db: Session = Depends(get_db), user: User = Depends(get_admin_user)):
     target = db.query(StorageTarget).filter(StorageTarget.id == target_id).first()
     if not target:
         raise HTTPException(404, "Storage target not found")
@@ -328,7 +336,7 @@ def test_storage_target(target_id: int, db: Session = Depends(get_db), user: Use
 
 
 @router.post("/storage-targets/{target_id}/import-catalog")
-def import_catalog_from_target(target_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def import_catalog_from_target(target_id: int, db: Session = Depends(get_db), user: User = Depends(get_admin_user)):
     """Scans a storage target for backups that already exist there (e.g. after
     a full host loss, restoring from an offsite copy) and creates local
     catalog entries for any not already known. The actual data is only
@@ -371,7 +379,7 @@ def import_catalog_from_target(target_id: int, db: Session = Depends(get_db), us
 # ---------- Google Drive / OneDrive OAuth ----------
 
 @router.get("/oauth/{provider}/start")
-def oauth_start(provider: str, user: User = Depends(get_current_user)):
+def oauth_start(provider: str, user: User = Depends(get_admin_user)):
     if provider not in ("google", "onedrive"):
         raise HTTPException(404, "Unknown provider")
     try:
@@ -403,7 +411,7 @@ def _callback_html(message: str, ok: bool, state: str = "", error: str = "") -> 
 
 @router.get("/oauth/{provider}/callback", response_class=HTMLResponse)
 def oauth_callback(provider: str, code: str = "", state: str = "", error: str = "",
-                    user: User = Depends(get_current_user)):
+                    user: User = Depends(get_admin_user)):
     if provider not in ("google", "onedrive"):
         raise HTTPException(404, "Unknown provider")
     if error:
@@ -424,7 +432,7 @@ class OAuthCompletePayload(BaseModel):
 
 @router.post("/storage-targets/oauth-complete")
 def oauth_complete(payload: OAuthCompletePayload, db: Session = Depends(get_db),
-                    user: User = Depends(get_current_user)):
+                    user: User = Depends(get_admin_user)):
     try:
         pending = oauth_storage.pop_pending(payload.state)
     except ValueError as exc:
@@ -457,7 +465,7 @@ def oauth_complete(payload: OAuthCompletePayload, db: Session = Depends(get_db),
 # ── Config export / import ──────────────────────────────────────────────────
 
 @router.get("/export")
-def export_config(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def export_config(db: Session = Depends(get_db), user: User = Depends(get_admin_user)):
     """Download all schedules, storage targets and users as a JSON backup."""
     targets = db.query(StorageTarget).order_by(StorageTarget.id).all()
     schedules = db.query(Schedule).order_by(Schedule.id).all()
@@ -514,7 +522,7 @@ class ImportConfigPayload(BaseModel):
 
 @router.post("/import")
 def import_config(payload: ImportConfigPayload, db: Session = Depends(get_db),
-                  user: User = Depends(get_current_user)):
+                  user: User = Depends(get_admin_user)):
     """Restore schedules and storage targets from a previously exported JSON."""
     data = payload.data
     if data.get("dbm_config_version") != 1:
