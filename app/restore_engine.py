@@ -176,10 +176,12 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
             target_type, target_config_json, _target_id = stream_target
             target_config = json.loads(target_config_json)
             container_name = meta.get("container_name", "")
-            repo_url = meta.get("restic_repo_url", "")
             snapshot_ids: dict = meta.get("restic_snapshot_ids", {})
             password = restic_engine.get_password()
-            _, r_env, smb_conf_path = restic_engine.repo_url_and_env(
+            # Recompute the repo URL from the CURRENT target's config so restores
+            # work cross-machine even when the source and restore machines have
+            # different SMB share names / base paths.
+            repo_url, r_env, smb_conf_path = restic_engine.repo_url_and_env(
                 target_type, target_config, container_name
             )
             try:
