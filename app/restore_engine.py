@@ -23,23 +23,31 @@ from app import encryption, restic_engine, storage_sync
 
 logger = logging.getLogger("dbm.restore")
 from app.backup_engine import ProgressCallback, StreamTarget, _noop_progress, restore_volume_from_file, restore_volume_from_tar, sanitize_name
-from app.config import BACKUPS_DIR
+from app.config import BASE_DIR, BACKUPS_DIR, container_path_to_host
 from app.docker_client import get_client
 
+# Where remapped bind-mount data lands when the original host path is not
+# writable by dockerd on this machine. Using the DBM data volume guarantees
+# that the directory is always reachable by the Docker daemon via the host
+# path returned by container_path_to_host().
+_BIND_REMAP_ROOT = BASE_DIR / "bind_mounts"
 
-def _remap_bind_path(original: str, fallback_base: str = "/opt/docker") -> str:
-    """Return a writable fallback for a machine-specific bind-mount host path.
 
-    Strips the first path component (e.g. /volume1, /volume2) and any leading
-    'docker' segment so that /volume1/docker/myapp/data → /opt/docker/myapp/data.
+def _remap_bind_path(original: str, container_name: str = "") -> tuple[str, str]:
+    """Return (container_path, host_path) for a bind-mount that can't be used as-is.
+
+    The data lands under _BIND_REMAP_ROOT (inside the DBM data volume) so it is
+    always reachable by the Docker daemon.  container_path_to_host() translates
+    the internal path to the host-side path that dockerd understands.
     """
-    parts = Path(original).parts  # ('/', 'volume1', 'docker', ...)
-    rest = list(parts[2:])        # drop '/' and first component
-    if rest and rest[0].lower() == "docker":
-        rest = rest[1:]
-    if not rest:
-        rest = [Path(original).name or "bind"]
-    return str(Path(fallback_base).joinpath(*rest))
+    # Strip leading slashes and replace path separators to build a flat key
+    safe = original.lstrip("/").replace("/", "_").replace("\\", "_") or "bind"
+    if container_name:
+        container_path = _BIND_REMAP_ROOT / container_name / safe
+    else:
+        container_path = _BIND_REMAP_ROOT / safe
+    host_path = container_path_to_host(container_path)
+    return str(container_path), host_path
 
 
 def _build_create_kwargs(container_json: dict, new_name: Optional[str], image_ref: str,
@@ -157,31 +165,6 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
     streamed_target_id = meta.get("streamed_target_id")
     bind_mounts_meta = meta.get("bind_mounts", [])
 
-    # Remap bind-mount host paths that can't be created on this machine.
-    # Must happen before bind_files / create_kwargs are built so all downstream
-    # code uses the new paths consistently.
-    bind_path_remap: dict[str, str] = {}
-    for mount in container_json.get("Mounts", []):
-        if mount.get("Type") != "bind":
-            continue
-        src = mount["Source"]
-        if Path(src).exists():
-            continue
-        try:
-            Path(src).mkdir(parents=True, exist_ok=True)
-        except OSError:
-            remapped = _remap_bind_path(src)
-            logger.info(
-                "Bind-Mount-Pfad '%s' nicht erstellbar auf diesem System, "
-                "wird automatisch auf '%s' umgeleitet",
-                src, remapped,
-            )
-            bind_path_remap[src] = remapped
-            mount["Source"] = remapped
-    for bm in bind_mounts_meta:
-        if bm.get("source") in bind_path_remap:
-            bm["source"] = bind_path_remap[bm["source"]]
-
     # Build volume name map: original name → restored name (or host path for custom dir).
     # Used both when restoring data into volumes and when wiring up the container config.
     original_container_name = meta.get("container_name") or container_json.get("Name", "").lstrip("/")
@@ -198,6 +181,34 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
     # Pre-build map from all named volumes so _build_create_kwargs can patch the container config.
     all_named_vols = [m["Name"] for m in container_json.get("Mounts", []) if m.get("Type") == "volume"]
     volume_name_map = {v: _map_vol(v) for v in all_named_vols}
+
+    # Remap bind-mount host paths that are not writable/creatable on this machine.
+    # Must happen before bind_files / create_kwargs are built so all downstream
+    # code uses the new paths consistently.
+    # mount["Source"] gets the HOST path (what dockerd sees).
+    # bind_mounts_meta["source"] gets the container-internal path (for data restore).
+    # Both are the same when no remap is needed; differ when we relocate to BASE_DIR.
+    for mount in container_json.get("Mounts", []):
+        if mount.get("Type") != "bind":
+            continue
+        src = mount["Source"]
+        if Path(src).exists():
+            continue
+        try:
+            Path(src).mkdir(parents=True, exist_ok=True)
+        except OSError:
+            container_path, host_path = _remap_bind_path(src, original_container_name)
+            Path(container_path).mkdir(parents=True, exist_ok=True)
+            logger.info(
+                "Bind-Mount '%s' → '%s' (Host: '%s')",
+                src, container_path, host_path,
+            )
+            # container_json uses host path → dockerd can reach it
+            mount["Source"] = host_path
+            # bind_mounts_meta uses container path → data restore writes there
+            for bm in bind_mounts_meta:
+                if bm.get("source") == src:
+                    bm["source"] = container_path
 
     if streamed_target_id is not None:
         # Volumes/binds were never written locally - each one has to be
@@ -350,10 +361,13 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
     on_progress(step, "Creating container", total_steps)
     create_kwargs = _build_create_kwargs(container_json, new_name, image_ref, volume_name_map)
 
-    # Ensure all (possibly remapped) bind-mount source dirs exist.
+    # Ensure bind-mount source dirs exist (best-effort; already handled by remap above).
     for mount in container_json.get("Mounts", []):
         if mount.get("Type") == "bind":
-            Path(mount["Source"]).mkdir(parents=True, exist_ok=True)
+            try:
+                Path(mount["Source"]).mkdir(parents=True, exist_ok=True)
+            except OSError:
+                pass  # host path not reachable from inside container — retry in start()
 
     try:
         container = client.containers.create(**create_kwargs)
@@ -379,23 +393,23 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
         except Exception as exc:
             # dockerd creates bind-mount source paths on the HOST, which may fail
             # even when Python's mkdir succeeded inside the DBM container
-            # (e.g. /volume1 is bind-mounted into DBM but not writable by dockerd
-            # on this host). Remove the broken container, remap ALL bind-mounts to
-            # /opt/docker/..., then rebuild and retry once.
+            # (e.g. /volume1 is bind-mounted into DBM but not writable by dockerd).
+            # Remap ALL bind-mounts to the DBM data volume (always reachable by
+            # dockerd via container_path_to_host) and retry once.
             msg = str(exc)
             if "creating mount source path" not in msg and "read-only file system" not in msg:
                 raise
-            logger.info("container.start() fehlgeschlagen mit Bind-Mount-Fehler — remappe Pfade und versuche erneut")
+            logger.info("container.start() fehlgeschlagen mit Bind-Mount-Fehler — remappe zu DBM-Datenpfad und versuche erneut")
             container.remove(force=True)
             for mount in container_json.get("Mounts", []):
                 if mount.get("Type") != "bind":
                     continue
                 old_src = mount["Source"]
-                new_src = _remap_bind_path(old_src)
-                if new_src != old_src:
-                    logger.info("Bind-Mount '%s' → '%s'", old_src, new_src)
-                    mount["Source"] = new_src
-                Path(mount["Source"]).mkdir(parents=True, exist_ok=True)
+                container_path, host_path = _remap_bind_path(old_src, original_container_name)
+                if host_path != old_src:
+                    logger.info("Bind-Mount '%s' → host:'%s'", old_src, host_path)
+                    mount["Source"] = host_path
+                Path(container_path).mkdir(parents=True, exist_ok=True)
             retry_kwargs = _build_create_kwargs(container_json, new_name, image_ref, volume_name_map)
             container = client.containers.create(**retry_kwargs)
             for net_name in networks_json.keys():
