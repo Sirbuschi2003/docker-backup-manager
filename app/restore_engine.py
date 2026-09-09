@@ -374,6 +374,35 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
             pass
 
     if start:
-        container.start()
+        try:
+            container.start()
+        except Exception as exc:
+            # dockerd creates bind-mount source paths on the HOST, which may fail
+            # even when Python's mkdir succeeded inside the DBM container
+            # (e.g. /volume1 is bind-mounted into DBM but not writable by dockerd
+            # on this host). Remove the broken container, remap ALL bind-mounts to
+            # /opt/docker/..., then rebuild and retry once.
+            msg = str(exc)
+            if "creating mount source path" not in msg and "read-only file system" not in msg:
+                raise
+            logger.info("container.start() fehlgeschlagen mit Bind-Mount-Fehler — remappe Pfade und versuche erneut")
+            container.remove(force=True)
+            for mount in container_json.get("Mounts", []):
+                if mount.get("Type") != "bind":
+                    continue
+                old_src = mount["Source"]
+                new_src = _remap_bind_path(old_src)
+                if new_src != old_src:
+                    logger.info("Bind-Mount '%s' → '%s'", old_src, new_src)
+                    mount["Source"] = new_src
+                Path(mount["Source"]).mkdir(parents=True, exist_ok=True)
+            retry_kwargs = _build_create_kwargs(container_json, new_name, image_ref, volume_name_map)
+            container = client.containers.create(**retry_kwargs)
+            for net_name in networks_json.keys():
+                try:
+                    client.networks.get(net_name).connect(container)
+                except Exception:  # noqa: BLE001
+                    pass
+            container.start()
 
     return container
