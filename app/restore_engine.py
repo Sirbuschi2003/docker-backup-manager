@@ -30,14 +30,51 @@ _BIND_REMAP_ROOT = BASE_DIR / "bind_mounts"
 
 
 def _bind_vol_name(original_src: str, container_name: str) -> str:
-    """Return a deterministic Docker volume name for a bind-mount that can't be used as-is.
-
-    Named Docker volumes are managed entirely by the daemon — no host-path
-    translation required, so they always work regardless of the host setup.
-    """
+    """Return a deterministic Docker volume name for a bind-mount that can't be used as-is."""
     safe = original_src.lstrip("/").replace("/", "_").replace("\\", "_") or "bind"
     name = f"dbm_bind_{sanitize_name(container_name)}_{safe}"
     return name[:255]
+
+
+def _remap_bind_mount(
+    mount: dict,
+    bind_mounts_meta: list,
+    original_container_name: str,
+) -> None:
+    """Redirect an unreachable bind-mount source to a path under _BIND_REMAP_ROOT.
+
+    DBM's /data directory is always accessible to dockerd via its real host
+    path, so redirecting here is guaranteed to work on any machine.
+
+    For DIRECTORY bind mounts:
+      - Creates remap_dir, redirects mount["Source"] and bm["source"] there.
+      - restore_volume_from_tar(host_path_of_remap_dir, ...) will extract data in.
+
+    For FILE bind mounts (source or destination path has a file extension):
+      - Creates remap_dir, redirects mount["Source"] to the specific file path.
+      - Updates bm["source"] to the DIRECTORY so restore_volume_from_tar
+        extracts the file there (tar -C <dir> → file lands at <dir>/<name>).
+    """
+    src = mount["Source"]
+    dst = mount.get("Destination", "")
+    safe_src = sanitize_name(src) or "bind"
+    remap_dir = _BIND_REMAP_ROOT / sanitize_name(original_container_name) / safe_src
+    remap_dir.mkdir(parents=True, exist_ok=True)
+    is_file = bool(Path(src).suffix or Path(dst).suffix)
+    if is_file:
+        # File bind mount: restore extracts to remap_dir, container sees the file
+        restore_target = container_path_to_host(remap_dir)
+        new_mount_src = container_path_to_host(remap_dir / Path(src).name)
+        label = "Datei-Bind-Mount"
+    else:
+        restore_target = container_path_to_host(remap_dir)
+        new_mount_src = restore_target
+        label = "Verzeichnis-Bind-Mount"
+    mount["Source"] = new_mount_src
+    for bm in bind_mounts_meta:
+        if bm.get("source") == src:
+            bm["source"] = restore_target
+    logger.info("%s '%s' → '%s'", label, src, new_mount_src)
 
 
 def _build_create_kwargs(container_json: dict, new_name: Optional[str], image_ref: str,
@@ -172,58 +209,27 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
     all_named_vols = [m["Name"] for m in container_json.get("Mounts", []) if m.get("Type") == "volume"]
     volume_name_map = {v: _map_vol(v) for v in all_named_vols}
 
-    # Bind-mount paths from the backup machine may not exist (or may not be
-    # writable by dockerd) on the restore machine.  When a path is completely
-    # inaccessible from inside the DBM container (mkdir raises OSError), we
-    # convert the bind mount to a named Docker volume right here — before the
-    # data-restore step — so the data ends up in the correct place and the
-    # container can always be started without any host-path translation.
-    # File bind mounts (single-file → single-file) cannot be remapped to a named
-    # volume (volumes are always directories). We drop them and log a warning.
-    mounts_after_remap: list[dict] = []
+    # Bind-mount paths from the backup machine may not exist on the restore machine
+    # (cross-machine restore) or may not be writable by dockerd (e.g. Synology
+    # /volume1 is read-only for the Docker daemon).
+    #
+    # Solution: redirect ALL unreachable bind mounts to _BIND_REMAP_ROOT, which
+    # lives under /data — a path that is ALWAYS accessible to dockerd because
+    # DBM's /data is mounted from a real host directory via docker-compose.
+    # This works for both directory AND file bind mounts.
     for mount in container_json.get("Mounts", []):
         if mount.get("Type") != "bind":
-            mounts_after_remap.append(mount)
             continue
         src = mount["Source"]
         if Path(src).exists():
-            # Path is accessible inside the DBM container — likely same machine or
-            # the volume is mounted in. Keep as bind mount; the retry block handles
-            # the rare case where the path exists in DBM but dockerd still can't use it.
-            mounts_after_remap.append(mount)
+            # Path is accessible inside DBM — likely same machine or the volume is
+            # mounted in. Keep as-is; the retry block handles the rare case where
+            # the path exists in DBM but dockerd still can't create it.
             continue
-        # Path does not exist from inside DBM (different machine or not mounted).
-        # Do NOT attempt mkdir — that would create the dir in the container's own
-        # overlay layer (no host effect) but still look "successful", causing the
-        # data restore and container create to use the unreachable host path.
-        dst = mount.get("Destination", "")
-        if Path(src).suffix or Path(dst).suffix:
-            # Source or destination has a file extension → this was a single-file
-            # bind mount. Named Docker volumes are always directories, so we cannot
-            # remap it. Drop it with a warning; the container will start without
-            # this specific file on the restore machine.
-            logger.warning(
-                "Datei-Bind-Mount '%s' → '%s' existiert auf dieser Maschine nicht "
-                "und kann nicht als Docker-Volume abgebildet werden — wird übersprungen.",
-                src, dst,
-            )
-            continue
-        # Convert to a named Docker volume immediately so data lands in the right
-        # place during the subsequent restore step.
-        vol_name = _bind_vol_name(src, original_container_name)
-        try:
-            client.volumes.create(name=vol_name)
-        except Exception:
-            pass
-        logger.info("Bind-Mount '%s' → Docker-Volume '%s'", src, vol_name)
-        mount["Type"] = "volume"
-        mount["Name"] = vol_name
-        mount.pop("Source", None)
-        for bm in bind_mounts_meta:
-            if bm.get("source") == src:
-                bm["source"] = vol_name
-        mounts_after_remap.append(mount)
-    container_json["Mounts"] = mounts_after_remap
+        # Path does not exist from inside DBM → different machine or not mounted.
+        # Do NOT attempt mkdir: inside a container overlay, mkdir always succeeds
+        # but has no effect on the host, so it masks the real problem.
+        _remap_bind_mount(mount, bind_mounts_meta, original_container_name)
 
     if streamed_target_id is not None:
         # Volumes/binds were never written locally - each one has to be
@@ -416,47 +422,34 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
             if "creating mount source path" not in msg and "read-only file system" not in msg:
                 raise
             logger.info(
-                "container.start() fehlgeschlagen (Bind-Mount-Pfad nicht erreichbar) "
-                "— konvertiere zu Docker-Volumes und versuche erneut"
+                "container.start() fehlgeschlagen (Bind-Mount-Pfad für dockerd nicht erreichbar) "
+                "— leite Bind-Mounts nach /data/bind_mounts um und versuche erneut"
             )
             container.remove(force=True)
-            retry_mounts: list[dict] = []
             for mount in container_json.get("Mounts", []):
                 if mount.get("Type") != "bind":
-                    retry_mounts.append(mount)
                     continue
                 old_src = mount["Source"]
-                old_dst = mount.get("Destination", "")
-                if Path(old_src).suffix or Path(old_dst).suffix:
-                    # File bind mount — cannot be represented as a named volume
-                    # (volumes are always directories). Drop it with a warning.
-                    logger.warning(
-                        "Datei-Bind-Mount '%s' → '%s' kann nicht als Docker-Volume "
-                        "abgebildet werden — wird übersprungen.",
-                        old_src, old_dst,
-                    )
-                    continue
-                vol_name = _bind_vol_name(old_src, original_container_name)
-                try:
-                    client.volumes.create(name=vol_name)
-                except Exception:
-                    pass
-                # Best-effort: copy existing data from the old path into the volume.
+                # Redirect this bind mount to _BIND_REMAP_ROOT (same approach as the
+                # early remap block, but the path existed in DBM — copy data over first).
                 old_path = Path(old_src)
+                is_file = bool(Path(old_src).suffix or Path(mount.get("Destination", "")).suffix)
                 if old_path.exists():
-                    tar_tmp = _BIND_REMAP_ROOT / f"_mig_{sanitize_name(old_src)}.tar"
+                    safe_src = sanitize_name(old_src) or "bind"
+                    remap_dir = _BIND_REMAP_ROOT / sanitize_name(original_container_name) / safe_src
+                    remap_dir.mkdir(parents=True, exist_ok=True)
+                    tar_tmp = remap_dir / "_mig.tar"
                     try:
                         import tarfile as _tarfile
-                        tar_tmp.parent.mkdir(parents=True, exist_ok=True)
                         with _tarfile.open(str(tar_tmp), "w") as tf:
-                            tf.add(str(old_path), arcname=".")
+                            tf.add(str(old_path), arcname=old_path.name if is_file else ".")
                         tar_host = container_path_to_host(tar_tmp)
                         client.containers.run(
                             DOCKER_HELPER_IMAGE,
                             command="tar xf /mig.tar -C /dst",
                             volumes={
                                 tar_host: {"bind": "/mig.tar", "mode": "ro"},
-                                vol_name: {"bind": "/dst", "mode": "rw"},
+                                container_path_to_host(remap_dir): {"bind": "/dst", "mode": "rw"},
                             },
                             remove=True,
                         )
@@ -467,12 +460,7 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
                             tar_tmp.unlink(missing_ok=True)
                         except Exception:
                             pass
-                logger.info("Bind-Mount '%s' → Docker-Volume '%s'", old_src, vol_name)
-                mount["Type"] = "volume"
-                mount["Name"] = vol_name
-                mount.pop("Source", None)
-                retry_mounts.append(mount)
-            container_json["Mounts"] = retry_mounts
+                _remap_bind_mount(mount, bind_mounts_meta, original_container_name)
             retry_kwargs = _build_create_kwargs(container_json, new_name, image_ref, volume_name_map)
             container = client.containers.create(**retry_kwargs)
             for net_name in networks_json.keys():
@@ -480,41 +468,6 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
                     client.networks.get(net_name).connect(container)
                 except Exception:  # noqa: BLE001
                     pass
-            try:
-                container.start()
-            except Exception as exc2:
-                # A named volume was mounted onto a file destination ("not a directory").
-                # This happens when a remaining bind mount targeted a single file.
-                # Parse the failing dst from the error, drop that mount, and retry once more.
-                msg2 = str(exc2)
-                if "not a directory" not in msg2:
-                    raise
-                import re as _re
-                bad_dst_match = _re.search(r"dst=([^,:\s]+)", msg2)
-                bad_dst = bad_dst_match.group(1) if bad_dst_match else None
-                logger.warning(
-                    "Datei-Bind-Mount auf '%s' schlägt fehl (not a directory) — "
-                    "Mount wird entfernt und Container erneut gestartet.", bad_dst or "?",
-                )
-                container.remove(force=True)
-                if bad_dst:
-                    container_json["Mounts"] = [
-                        m for m in container_json["Mounts"] if m.get("Destination") != bad_dst
-                    ]
-                else:
-                    # Can't identify which mount failed — drop all dbm_bind_ volumes
-                    # that target paths without a trailing slash (file-like destinations).
-                    container_json["Mounts"] = [
-                        m for m in container_json["Mounts"]
-                        if not (m.get("Name", "").startswith("dbm_bind_") and not m.get("Destination", "").endswith("/"))
-                    ]
-                retry2_kwargs = _build_create_kwargs(container_json, new_name, image_ref, volume_name_map)
-                container = client.containers.create(**retry2_kwargs)
-                for net_name in networks_json.keys():
-                    try:
-                        client.networks.get(net_name).connect(container)
-                    except Exception:  # noqa: BLE001
-                        pass
-                container.start()
+            container.start()
 
     return container
