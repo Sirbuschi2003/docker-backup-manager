@@ -183,25 +183,28 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
             continue
         src = mount["Source"]
         if Path(src).exists():
+            # Path is accessible inside the DBM container — likely same machine or
+            # the volume is mounted in. Keep as bind mount; the retry block handles
+            # the rare case where the path exists in DBM but dockerd still can't use it.
             continue
+        # Path does not exist from inside DBM (different machine or not mounted).
+        # Do NOT attempt mkdir — that would create the dir in the container's own
+        # overlay layer (no host effect) but still look "successful", causing the
+        # data restore and container create to use the unreachable host path.
+        # Convert to a named Docker volume immediately so data lands in the right
+        # place during the subsequent restore step.
+        vol_name = _bind_vol_name(src, original_container_name)
         try:
-            Path(src).mkdir(parents=True, exist_ok=True)
-            # mkdir succeeded from inside DBM — keep original path.
-            # If dockerd still can't use it, the retry block below handles it.
-        except OSError:
-            # Path completely inaccessible from inside DBM — convert to named volume now.
-            vol_name = _bind_vol_name(src, original_container_name)
-            try:
-                client.volumes.create(name=vol_name)
-            except Exception:
-                pass
-            logger.info("Bind-Mount '%s' → Docker-Volume '%s'", src, vol_name)
-            mount["Type"] = "volume"
-            mount["Name"] = vol_name
-            mount.pop("Source", None)
-            for bm in bind_mounts_meta:
-                if bm.get("source") == src:
-                    bm["source"] = vol_name
+            client.volumes.create(name=vol_name)
+        except Exception:
+            pass
+        logger.info("Bind-Mount '%s' → Docker-Volume '%s'", src, vol_name)
+        mount["Type"] = "volume"
+        mount["Name"] = vol_name
+        mount.pop("Source", None)
+        for bm in bind_mounts_meta:
+            if bm.get("source") == src:
+                bm["source"] = vol_name
 
     if streamed_target_id is not None:
         # Volumes/binds were never written locally - each one has to be
