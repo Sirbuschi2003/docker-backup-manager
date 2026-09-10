@@ -62,9 +62,12 @@ def _remap_bind_mount(
     remap_dir.mkdir(parents=True, exist_ok=True)
     is_file = bool(Path(src).suffix or Path(dst).suffix)
     if is_file:
-        # File bind mount: restore extracts to remap_dir, container sees the file
+        # File bind mount: the backup tar was created with `tar cf - /data` where
+        # /data was the file — so the tar entry is named "data", not the original
+        # filename.  The restore step extracts it to remap_dir/data.
+        # Point the container's bind-mount source to that exact file path.
         restore_target = container_path_to_host(remap_dir)
-        new_mount_src = container_path_to_host(remap_dir / Path(src).name)
+        new_mount_src = container_path_to_host(remap_dir / "data")
         label = "Datei-Bind-Mount"
     else:
         restore_target = container_path_to_host(remap_dir)
@@ -442,7 +445,9 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
                     try:
                         import tarfile as _tarfile
                         with _tarfile.open(str(tar_tmp), "w") as tf:
-                            tf.add(str(old_path), arcname=old_path.name if is_file else ".")
+                            # Use arcname="data" for files so the entry name matches
+                            # what the backup pipeline produces (tar cf - /data → "data").
+                            tf.add(str(old_path), arcname="data" if is_file else ".")
                         tar_host = container_path_to_host(tar_tmp)
                         client.containers.run(
                             DOCKER_HELPER_IMAGE,
