@@ -178,19 +178,36 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
     # convert the bind mount to a named Docker volume right here — before the
     # data-restore step — so the data ends up in the correct place and the
     # container can always be started without any host-path translation.
+    # File bind mounts (single-file → single-file) cannot be remapped to a named
+    # volume (volumes are always directories). We drop them and log a warning.
+    mounts_after_remap: list[dict] = []
     for mount in container_json.get("Mounts", []):
         if mount.get("Type") != "bind":
+            mounts_after_remap.append(mount)
             continue
         src = mount["Source"]
         if Path(src).exists():
             # Path is accessible inside the DBM container — likely same machine or
             # the volume is mounted in. Keep as bind mount; the retry block handles
             # the rare case where the path exists in DBM but dockerd still can't use it.
+            mounts_after_remap.append(mount)
             continue
         # Path does not exist from inside DBM (different machine or not mounted).
         # Do NOT attempt mkdir — that would create the dir in the container's own
         # overlay layer (no host effect) but still look "successful", causing the
         # data restore and container create to use the unreachable host path.
+        dst = mount.get("Destination", "")
+        if Path(src).suffix or Path(dst).suffix:
+            # Source or destination has a file extension → this was a single-file
+            # bind mount. Named Docker volumes are always directories, so we cannot
+            # remap it. Drop it with a warning; the container will start without
+            # this specific file on the restore machine.
+            logger.warning(
+                "Datei-Bind-Mount '%s' → '%s' existiert auf dieser Maschine nicht "
+                "und kann nicht als Docker-Volume abgebildet werden — wird übersprungen.",
+                src, dst,
+            )
+            continue
         # Convert to a named Docker volume immediately so data lands in the right
         # place during the subsequent restore step.
         vol_name = _bind_vol_name(src, original_container_name)
@@ -205,6 +222,8 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
         for bm in bind_mounts_meta:
             if bm.get("source") == src:
                 bm["source"] = vol_name
+        mounts_after_remap.append(mount)
+    container_json["Mounts"] = mounts_after_remap
 
     if streamed_target_id is not None:
         # Volumes/binds were never written locally - each one has to be
@@ -401,10 +420,22 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
                 "— konvertiere zu Docker-Volumes und versuche erneut"
             )
             container.remove(force=True)
+            retry_mounts: list[dict] = []
             for mount in container_json.get("Mounts", []):
                 if mount.get("Type") != "bind":
+                    retry_mounts.append(mount)
                     continue
                 old_src = mount["Source"]
+                old_dst = mount.get("Destination", "")
+                if Path(old_src).suffix or Path(old_dst).suffix:
+                    # File bind mount — cannot be represented as a named volume
+                    # (volumes are always directories). Drop it with a warning.
+                    logger.warning(
+                        "Datei-Bind-Mount '%s' → '%s' kann nicht als Docker-Volume "
+                        "abgebildet werden — wird übersprungen.",
+                        old_src, old_dst,
+                    )
+                    continue
                 vol_name = _bind_vol_name(old_src, original_container_name)
                 try:
                     client.volumes.create(name=vol_name)
@@ -440,6 +471,8 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
                 mount["Type"] = "volume"
                 mount["Name"] = vol_name
                 mount.pop("Source", None)
+                retry_mounts.append(mount)
+            container_json["Mounts"] = retry_mounts
             retry_kwargs = _build_create_kwargs(container_json, new_name, image_ref, volume_name_map)
             container = client.containers.create(**retry_kwargs)
             for net_name in networks_json.keys():
@@ -447,6 +480,41 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
                     client.networks.get(net_name).connect(container)
                 except Exception:  # noqa: BLE001
                     pass
-            container.start()
+            try:
+                container.start()
+            except Exception as exc2:
+                # A named volume was mounted onto a file destination ("not a directory").
+                # This happens when a remaining bind mount targeted a single file.
+                # Parse the failing dst from the error, drop that mount, and retry once more.
+                msg2 = str(exc2)
+                if "not a directory" not in msg2:
+                    raise
+                import re as _re
+                bad_dst_match = _re.search(r"dst=([^,:\s]+)", msg2)
+                bad_dst = bad_dst_match.group(1) if bad_dst_match else None
+                logger.warning(
+                    "Datei-Bind-Mount auf '%s' schlägt fehl (not a directory) — "
+                    "Mount wird entfernt und Container erneut gestartet.", bad_dst or "?",
+                )
+                container.remove(force=True)
+                if bad_dst:
+                    container_json["Mounts"] = [
+                        m for m in container_json["Mounts"] if m.get("Destination") != bad_dst
+                    ]
+                else:
+                    # Can't identify which mount failed — drop all dbm_bind_ volumes
+                    # that target paths without a trailing slash (file-like destinations).
+                    container_json["Mounts"] = [
+                        m for m in container_json["Mounts"]
+                        if not (m.get("Name", "").startswith("dbm_bind_") and not m.get("Destination", "").endswith("/"))
+                    ]
+                retry2_kwargs = _build_create_kwargs(container_json, new_name, image_ref, volume_name_map)
+                container = client.containers.create(**retry2_kwargs)
+                for net_name in networks_json.keys():
+                    try:
+                        client.networks.get(net_name).connect(container)
+                    except Exception:  # noqa: BLE001
+                        pass
+                container.start()
 
     return container
