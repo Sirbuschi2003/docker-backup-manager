@@ -28,12 +28,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract version from config.py
-        id: version
+      - name: Extract version and compute image name
+        id: meta
         run: |
           VERSION=$(grep 'APP_VERSION' app/config.py | grep -oP '"\K[^"]+')
+          OWNER="${{ github.repository_owner }}"
+          IMAGE="ghcr.io/${OWNER,,}/docker-backup-manager"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Building version $VERSION"
+          echo "image=$IMAGE" >> $GITHUB_OUTPUT
+          echo "Building $IMAGE:$VERSION"
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -42,7 +45,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/docker-backup-manager:latest
-            ghcr.io/${{ github.repository_owner }}/docker-backup-manager:${{ steps.version.outputs.version }}
+            ${{ steps.meta.outputs.image }}:latest
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
