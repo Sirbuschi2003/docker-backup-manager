@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import tarfile as _tarfile
 import tempfile
 from pathlib import Path
 from typing import Callable, Optional
@@ -29,55 +30,62 @@ from app.docker_client import get_client
 _BIND_REMAP_ROOT = BASE_DIR / "bind_mounts"
 
 
-def _bind_vol_name(original_src: str, container_name: str) -> str:
-    """Return a deterministic Docker volume name for a bind-mount that can't be used as-is."""
-    safe = original_src.lstrip("/").replace("/", "_").replace("\\", "_") or "bind"
-    name = f"dbm_bind_{sanitize_name(container_name)}_{safe}"
-    return name[:255]
-
-
 def _remap_bind_mount(
     mount: dict,
     bind_mounts_meta: list,
     original_container_name: str,
-) -> None:
-    """Redirect an unreachable bind-mount source to a path under _BIND_REMAP_ROOT.
+    is_file: Optional[bool] = None,
+) -> str:
+    """Redirect a bind-mount source to a stable path under _BIND_REMAP_ROOT.
 
-    DBM's /data directory is always accessible to dockerd via its real host
-    path, so redirecting here is guaranteed to work on any machine.
+    DBM's /data is mounted from a real host directory, so paths under it are
+    always accessible to dockerd — regardless of NAS filesystem restrictions or
+    whether this is a cross-machine restore.
 
-    For DIRECTORY bind mounts:
-      - Creates remap_dir, redirects mount["Source"] and bm["source"] there.
-      - restore_volume_from_tar(host_path_of_remap_dir, ...) will extract data in.
+    For DIRECTORY mounts:
+        mount["Source"]  → remap_dir  (host path of the directory)
+        bm["source"]     → remap_dir  (restore step extracts contents here)
 
-    For FILE bind mounts (source or destination path has a file extension):
-      - Creates remap_dir, redirects mount["Source"] to the specific file path.
-      - Updates bm["source"] to the DIRECTORY so restore_volume_from_tar
-        extracts the file there (tar -C <dir> → file lands at <dir>/<name>).
+    For FILE mounts:
+        mount["Source"]  → remap_dir/data  (the actual file after extraction)
+        bm["source"]     → remap_dir       (restore step extracts to this dir;
+                                            entry "data" → remap_dir/data)
+
+    The backup pipeline creates file archives with `tar cf - /data` where
+    /data is the bind-mounted FILE, producing a tar entry named "data".
+    Extraction to remap_dir therefore creates remap_dir/data.
+
+    is_file: use the value stored in backup metadata when available; when None
+    fall back to a suffix heuristic (handles old backups without the field).
+
+    Returns the original source path (before the redirect).
     """
     src = mount["Source"]
     dst = mount.get("Destination", "")
     safe_src = sanitize_name(src) or "bind"
     remap_dir = _BIND_REMAP_ROOT / sanitize_name(original_container_name) / safe_src
     remap_dir.mkdir(parents=True, exist_ok=True)
-    is_file = bool(Path(src).suffix or Path(dst).suffix)
+
+    if is_file is None:
+        # Fallback heuristic for old backups without the is_file field.
+        # A suffix on source OR destination strongly suggests a single-file mount.
+        is_file = bool(Path(src).suffix or Path(dst).suffix)
+
+    restore_target = container_path_to_host(remap_dir)
     if is_file:
-        # File bind mount: the backup tar was created with `tar cf - /data` where
-        # /data was the file — so the tar entry is named "data", not the original
-        # filename.  The restore step extracts it to remap_dir/data.
-        # Point the container's bind-mount source to that exact file path.
-        restore_target = container_path_to_host(remap_dir)
         new_mount_src = container_path_to_host(remap_dir / "data")
         label = "Datei-Bind-Mount"
     else:
-        restore_target = container_path_to_host(remap_dir)
         new_mount_src = restore_target
         label = "Verzeichnis-Bind-Mount"
+
     mount["Source"] = new_mount_src
     for bm in bind_mounts_meta:
         if bm.get("source") == src:
             bm["source"] = restore_target
+
     logger.info("%s '%s' → '%s'", label, src, new_mount_src)
+    return src  # original source, useful to callers
 
 
 def _build_create_kwargs(container_json: dict, new_name: Optional[str], image_ref: str,
@@ -156,33 +164,22 @@ def restore_container(backup_dir: Path, new_name: Optional[str] = None, start: b
         target_type, target_config_json, _target_id = stream_target
         storage_sync.download_full_backup_from_target(target_type, target_config_json, relative_key, backup_dir)
 
-    if overwrite:
-        client = get_client()
-        target_name = new_name or (
-            json.loads((backup_dir / "container.json").read_text()).get("Name", "").lstrip("/")
-            if (backup_dir / "container.json").exists() else None
-        )
-        if target_name:
-            try:
-                existing = client.containers.get(target_name)
-                existing.remove(force=True)
-            except Exception as _rm_exc:
-                if "No such container" not in str(_rm_exc) and "404" not in str(_rm_exc):
-                    logger.warning("Konnte vorhandenen Container '%s' nicht entfernen: %s", target_name, _rm_exc)
-
     if encryption.is_backup_encrypted(backup_dir):
         on_progress(0, "Decrypting backup", 1)
         with encryption.decrypt_directory_to_temp(backup_dir) as tmp_dir:
             return _restore_from_plaintext_dir(Path(tmp_dir), new_name, start, on_progress,
-                                                stream_target, relative_key, rename_volumes, volume_base_dir)
-    return _restore_from_plaintext_dir(backup_dir, new_name, start, on_progress, stream_target, relative_key,
-                                        rename_volumes, volume_base_dir)
+                                                stream_target, relative_key, rename_volumes,
+                                                volume_base_dir, overwrite)
+    return _restore_from_plaintext_dir(backup_dir, new_name, start, on_progress, stream_target,
+                                        relative_key, rename_volumes, volume_base_dir, overwrite)
 
 
 def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start: bool,
                                  on_progress: ProgressCallback,
                                  stream_target: Optional[StreamTarget], relative_key: str,
-                                 rename_volumes: bool = True, volume_base_dir: Optional[str] = None):
+                                 rename_volumes: bool = True,
+                                 volume_base_dir: Optional[str] = None,
+                                 overwrite: bool = False):
     client = get_client()
 
     container_json = json.loads((backup_dir / "container.json").read_text())
@@ -195,8 +192,20 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
     streamed_target_id = meta.get("streamed_target_id")
     bind_mounts_meta = meta.get("bind_mounts", [])
 
-    # Build volume name map: original name → restored name (or host path for custom dir).
-    # Used both when restoring data into volumes and when wiring up the container config.
+    # Remove the existing container now that we have the plaintext container name.
+    # (The overwrite check in restore_container can't do this for encrypted backups
+    # because container.json is not readable before decryption.)
+    if overwrite:
+        target_name = new_name or container_json.get("Name", "").lstrip("/")
+        if target_name:
+            try:
+                existing = client.containers.get(target_name)
+                existing.remove(force=True)
+                logger.info("Vorhandener Container '%s' wurde entfernt (overwrite=True)", target_name)
+            except Exception as _rm_exc:
+                if "No such container" not in str(_rm_exc) and "404" not in str(_rm_exc):
+                    logger.warning("Konnte vorhandenen Container '%s' nicht entfernen: %s", target_name, _rm_exc)
+
     original_container_name = meta.get("container_name") or container_json.get("Name", "").lstrip("/")
     effective_name = new_name or original_container_name
 
@@ -208,35 +217,40 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
             return str(Path(volume_base_dir) / mapped)
         return mapped
 
-    # Pre-build map from all named volumes so _build_create_kwargs can patch the container config.
     all_named_vols = [m["Name"] for m in container_json.get("Mounts", []) if m.get("Type") == "volume"]
     volume_name_map = {v: _map_vol(v) for v in all_named_vols}
 
-    # Bind-mount paths from the backup machine may not exist on the restore machine
-    # (cross-machine restore) or may not be writable by dockerd (e.g. Synology
-    # /volume1 is read-only for the Docker daemon).
-    #
-    # Solution: redirect ALL unreachable bind mounts to _BIND_REMAP_ROOT, which
-    # lives under /data — a path that is ALWAYS accessible to dockerd because
-    # DBM's /data is mounted from a real host directory via docker-compose.
-    # This works for both directory AND file bind mounts.
+    # Build a lookup: original_source → is_file, from backup metadata.
+    # is_file is stored since backup_engine v1.4.5; older backups don't have it
+    # (None = unknown, _remap_bind_mount will fall back to a suffix heuristic).
+    bind_is_file: dict[str, Optional[bool]] = {
+        bm["source"]: bm.get("is_file")
+        for bm in bind_mounts_meta
+    }
+
+    # Remap bind mounts whose source paths don't exist on this machine.
+    # We track which mounts were remapped here so the retry block below can
+    # skip them (they already point to _BIND_REMAP_ROOT, which dockerd can
+    # always reach — they cannot be the cause of a subsequent start failure).
+    remapped_mount_ids: set[int] = set()
     for mount in container_json.get("Mounts", []):
         if mount.get("Type") != "bind":
             continue
         src = mount["Source"]
         if Path(src).exists():
-            # Path is accessible inside DBM — likely same machine or the volume is
-            # mounted in. Keep as-is; the retry block handles the rare case where
-            # the path exists in DBM but dockerd still can't create it.
+            # Accessible inside DBM — same machine or the path is mounted in.
+            # Keep the original source; the retry block handles the rare case
+            # where the path exists in DBM but dockerd still can't use it.
             continue
-        # Path does not exist from inside DBM → different machine or not mounted.
-        # Do NOT attempt mkdir: inside a container overlay, mkdir always succeeds
-        # but has no effect on the host, so it masks the real problem.
-        _remap_bind_mount(mount, bind_mounts_meta, original_container_name)
+        # Path not found in DBM → cross-machine restore or not mounted.
+        # Do NOT attempt mkdir: inside a container overlay mkdir always
+        # succeeds in the overlay layer, never on the real host, masking
+        # the problem and sending data to the wrong place.
+        _remap_bind_mount(mount, bind_mounts_meta, original_container_name,
+                          is_file=bind_is_file.get(src))
+        remapped_mount_ids.add(id(mount))
 
     if streamed_target_id is not None:
-        # Volumes/binds were never written locally - each one has to be
-        # fetched from the target it was streamed to before it can be restored.
         if not stream_target:
             raise RuntimeError(
                 "Dieses Backup wurde direkt zu einem Speicherziel gestreamt, aber das Ziel ist nicht "
@@ -249,18 +263,11 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
         stage_dir = Path(stage_dir_ctx.name)
 
         if meta.get("backup_engine") == "restic":
-            # Restic-Restore: Snapshots per restic dump → unkomprimiertes Tar → Docker-Volume
             target_type, target_config_json, _target_id = stream_target
             target_config = json.loads(target_config_json)
             container_name = meta.get("container_name", "")
             snapshot_ids: dict = meta.get("restic_snapshot_ids", {})
-            # Prefer the password stored in meta.json (written at backup time)
-            # so cross-machine restores work even when the local restic password
-            # differs from the one used when the backup was created.
             password = meta.get("restic_password") or restic_engine.get_password()
-            # Recompute the repo URL from the CURRENT target's config so restores
-            # work cross-machine even when the source and restore machines have
-            # different SMB share names / base paths.
             repo_url, r_env, smb_conf_path = restic_engine.repo_url_and_env(
                 target_type, target_config, container_name
             )
@@ -288,10 +295,8 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
                         Path(smb_conf_path).unlink(missing_ok=True)
                     except Exception:
                         pass
-            # Reuse the common restore path below, marking files as uncompressed tar
             _restic_restore = True
         else:
-            # Altes Tar-Stream-Verfahren
             target_type, target_config_json, _target_id = stream_target
             volume_files = []
             for vol_name in volume_names:
@@ -318,8 +323,8 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
 
     try:
         if _restic_restore:
-            all_vol_entries = volume_files        # list of (vol_name, path, "tar")
-            all_bind_entries = bind_files_restic  # list of (source, path)
+            all_vol_entries = volume_files
+            all_bind_entries = bind_files_restic
         else:
             all_vol_entries = [(f.name[:-len(".tar.gz")], f, "tar.gz") for f in volume_files]
             all_bind_entries = bind_files
@@ -330,7 +335,6 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
         on_progress(step, "Loading image", total_steps)
         local_image_tar = backup_dir / "image.tar"
         if not local_image_tar.exists() and streamed_target_id is not None and stream_target:
-            # Image was streamed directly to the storage target — download it first
             target_type, target_config_json, _target_id = stream_target
             dl_dest = stage_dir / "image.tar"
             storage_sync.download_from_target(
@@ -355,7 +359,6 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
             mapped = _map_vol(vol_name)
             on_progress(step, f"Restoring volume {mapped}", total_steps)
             if volume_base_dir:
-                # Restore into a host directory (bind mount) — Docker creates it automatically
                 Path(mapped).mkdir(parents=True, exist_ok=True)
             else:
                 existing_volumes = {v.name for v in client.volumes.list()}
@@ -369,10 +372,6 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
         for source, bind_file in all_bind_entries:
             step += 1
             on_progress(step, f"Restoring bind mount {source}", total_steps)
-            # Extracting into `source` (a host path, not a Docker volume name)
-            # works the same way restore_volume_from_file already bind-mounts
-            # a host path for named volumes - Docker auto-creates the host
-            # directory if it doesn't exist yet.
             if _restic_restore:
                 restore_volume_from_tar(source, bind_file)
             else:
@@ -384,14 +383,6 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
     step += 1
     on_progress(step, "Creating container", total_steps)
     create_kwargs = _build_create_kwargs(container_json, new_name, image_ref, volume_name_map)
-
-    # Best-effort: ensure bind-mount source dirs exist on this machine.
-    for mount in container_json.get("Mounts", []):
-        if mount.get("Type") == "bind":
-            try:
-                Path(mount["Source"]).mkdir(parents=True, exist_ok=True)
-            except OSError:
-                pass
 
     try:
         container = client.containers.create(**create_kwargs)
@@ -418,35 +409,45 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
             # dockerd creates bind-mount source paths on the HOST, which may fail
             # even when the path is accessible inside the DBM container (e.g. the
             # Synology /volume1 filesystem is read-only for the Docker daemon).
-            # Convert ALL remaining bind mounts to named Docker volumes and retry.
-            # Named volumes are managed entirely by the daemon — no host-path
-            # translation required, so they always work.
+            # Redirect only the mounts that were NOT already remapped by the early
+            # remap block above (those already point to _BIND_REMAP_ROOT and cannot
+            # have caused this failure).
             msg = str(exc)
             if "creating mount source path" not in msg and "read-only file system" not in msg:
                 raise
             logger.info(
                 "container.start() fehlgeschlagen (Bind-Mount-Pfad für dockerd nicht erreichbar) "
-                "— leite Bind-Mounts nach /data/bind_mounts um und versuche erneut"
+                "— leite verbleibende Bind-Mounts nach /data/bind_mounts um und versuche erneut"
             )
             container.remove(force=True)
+
             for mount in container_json.get("Mounts", []):
                 if mount.get("Type") != "bind":
                     continue
+                if id(mount) in remapped_mount_ids:
+                    # Already redirected to _BIND_REMAP_ROOT — cannot be the
+                    # cause of this failure, skip.
+                    continue
+
                 old_src = mount["Source"]
-                # Redirect this bind mount to _BIND_REMAP_ROOT (same approach as the
-                # early remap block, but the path existed in DBM — copy data over first).
+                is_file = bind_is_file.get(old_src)
+                safe_src = sanitize_name(old_src) or "bind"
+                remap_dir = _BIND_REMAP_ROOT / sanitize_name(original_container_name) / safe_src
+                remap_dir.mkdir(parents=True, exist_ok=True)
+
+                # Resolve is_file if not in metadata
+                if is_file is None:
+                    is_file = bool(Path(old_src).suffix or Path(mount.get("Destination", "")).suffix)
+
+                # Best-effort: copy existing data from the old path into remap_dir
+                # before redirecting the mount, so the container keeps its data.
                 old_path = Path(old_src)
-                is_file = bool(Path(old_src).suffix or Path(mount.get("Destination", "")).suffix)
                 if old_path.exists():
-                    safe_src = sanitize_name(old_src) or "bind"
-                    remap_dir = _BIND_REMAP_ROOT / sanitize_name(original_container_name) / safe_src
-                    remap_dir.mkdir(parents=True, exist_ok=True)
                     tar_tmp = remap_dir / "_mig.tar"
                     try:
-                        import tarfile as _tarfile
                         with _tarfile.open(str(tar_tmp), "w") as tf:
-                            # Use arcname="data" for files so the entry name matches
-                            # what the backup pipeline produces (tar cf - /data → "data").
+                            # arcname="data" for files matches the backup pipeline's
+                            # `tar cf - /data` convention (entry "data").
                             tf.add(str(old_path), arcname="data" if is_file else ".")
                         tar_host = container_path_to_host(tar_tmp)
                         client.containers.run(
@@ -465,7 +466,10 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
                             tar_tmp.unlink(missing_ok=True)
                         except Exception:
                             pass
-                _remap_bind_mount(mount, bind_mounts_meta, original_container_name)
+
+                _remap_bind_mount(mount, bind_mounts_meta, original_container_name, is_file=is_file)
+                remapped_mount_ids.add(id(mount))
+
             retry_kwargs = _build_create_kwargs(container_json, new_name, image_ref, volume_name_map)
             container = client.containers.create(**retry_kwargs)
             for net_name in networks_json.keys():

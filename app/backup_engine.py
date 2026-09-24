@@ -482,8 +482,11 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
             _check_cancel(should_cancel, f"before bind mount {destination}")
             bind_filename = f"{sanitize_name(destination)}.tar.gz"
             bind_mounts_meta.append({
-                "source": source, "destination": destination, "filename": bind_filename,
+                "source": source,
+                "destination": destination,
+                "filename": bind_filename,
                 "rw": mount.get("RW", True),
+                "is_file": Path(source).is_file(),
             })
 
             if use_restic:
