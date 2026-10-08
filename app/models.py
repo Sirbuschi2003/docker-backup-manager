@@ -78,3 +78,11 @@ class LogEntry(Base):
     level = Column(String(16), nullable=False, default="info")  # info | error
     category = Column(String(16), nullable=False)  # backup | restore | schedule
     message = Column(Text, nullable=False)
+
+
+class AppSetting(Base):
+    """Einfache Schlüssel/Wert-Einstellungen (JSON), z. B. die NetPulse-Kopplung."""
+    __tablename__ = "app_settings"
+
+    key = Column(String(64), primary_key=True)
+    value = Column(Text, nullable=True)

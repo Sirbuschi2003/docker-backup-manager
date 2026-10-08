@@ -24,11 +24,13 @@ import json
 import logging
 import shutil
 import tarfile
+import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterator, Optional
 
-from app import encryption, restic_engine, storage_sync
+from app import encryption, netpulse, restic_engine, storage_sync
 from app.config import BACKUPS_DIR, DOCKER_HELPER_IMAGE, container_path_to_host
 from app.docker_client import get_client
 
@@ -291,7 +293,26 @@ def restore_volume_from_tar(volume_name: str, src_tar: Path) -> None:
     )
 
 
-def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
+def backup_container(container_id_or_name: str, *args, **kwargs) -> BackupResult:
+    """Container sichern und das Ergebnis (falls eingeschaltet) an NetPulse melden."""
+    started = time.monotonic()
+    try:
+        result = _backup_container(container_id_or_name, *args, **kwargs)
+    except Exception as exc:
+        _report_async(str(container_id_or_name), "failed", str(exc), None, time.monotonic() - started)
+        raise
+    status = "cancelled" if result.cancelled else ("ok" if result.ok else "failed")
+    _report_async(result.name, status, result.error, result.size_bytes if result.ok else None, time.monotonic() - started)
+    return result
+
+
+def _report_async(name: str, status: str, error, size, duration) -> None:
+    # Im Hintergrund: ein nicht erreichbares NetPulse soll das Backup nicht aufhalten
+    threading.Thread(target=netpulse.report, args=(name, status, error, size, round(duration, 1)),
+                     daemon=True, name=f"netpulse-report-{name}").start()
+
+
+def _backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
                       on_progress: ProgressCallback = _noop_progress,
                       stream_target: Optional[StreamTarget] = None,
                       should_cancel: ShouldCancel = _never_cancel,
@@ -321,6 +342,8 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
     # unexpectedly (the user may have stopped it deliberately).
     should_stop = stop_container and attrs.get("State", {}).get("Status") == "running"
     container_stopped = False
+    # NetPulse-Pause, solange der Container gestoppt ist (keine Fehlalarme während des Backups)
+    np_pause = None
     # inspect+networks, image, finalize, one per volume, one per bind mount, optional encrypt, optional stop+restart
     total_steps = 3 + len(volume_mounts) + len(bind_mounts) + (1 if encrypt else 0) + (2 if should_stop else 0)
 
@@ -434,6 +457,9 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
             step += 1
             _check_cancel(should_cancel, f"before stopping {name}")
             on_progress(step, f"Stopping {name} for a consistent backup", total_steps)
+            np_pause = netpulse.pause([name], "Backup")
+            if np_pause:
+                _log("NetPulse: Überwachung für diesen Container pausiert")
             _log(f"Container {name} wird gestoppt")
             container.stop()
             container_stopped = True
@@ -527,6 +553,10 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
             container.start()
             container_stopped = False
             _log(f"Container {name} läuft wieder")
+            if np_pause:
+                netpulse.resume(np_pause)
+                np_pause = None
+                _log("NetPulse: Überwachung läuft nach kurzer Nachlaufzeit wieder")
 
         step += 1
         on_progress(step, "Finalizing", total_steps)
@@ -581,6 +611,9 @@ def backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
                 container.start()
             except Exception:  # noqa: BLE001
                 logger.exception("Failed to restart container %s after backup", name)
+        if np_pause:
+            # Auch nach einem Fehler: NetPulse wieder überwachen lassen (läuft der Container nicht, meldet es das)
+            netpulse.resume(np_pause)
         if restic_smb_conf:
             try:
                 Path(restic_smb_conf).unlink(missing_ok=True)
@@ -634,6 +667,9 @@ def backup_landscape(dest_root: Path = BACKUPS_DIR, project_filter: Optional[str
     errors = []
     cancelled = False
     total = max(len(containers), 1)
+    # Bei gestoppten Containern die ganze Gruppe pausieren: z. B. ist Nextcloud auch dann gestört,
+    # wenn gerade nur seine Datenbank gesichert wird
+    group_pause = netpulse.pause([c.name for c in containers], f"Backup {landscape_name}") if stop_containers else None
     try:
         for idx, c in enumerate(containers, start=1):
             if should_cancel():
@@ -689,6 +725,8 @@ def backup_landscape(dest_root: Path = BACKUPS_DIR, project_filter: Optional[str
         # so no orphaned directory is left on disk without a DB record.
         shutil.rmtree(landscape_dir, ignore_errors=True)
         raise
+    finally:
+        netpulse.resume(group_pause)
 
 
 def delete_backup(path: Path) -> None:

@@ -1508,6 +1508,11 @@ async function settingsPage() {
       <div class="toolbar"><button class="btn primary" id="new-user-btn">Neuen Benutzer anlegen</button></div>
     </div>
 
+    <div id="netpulse-section" style="display:none">
+      <div class="section-title">NetPulse-Überwachung (optional)</div>
+      <div class="card" id="netpulse-card"><span class="muted">Lade …</span></div>
+    </div>
+
     <div class="section-title">Externe Speicherziele (SMB / NFS / S3 / Google Drive / OneDrive / ...)</div>
     <p class="muted" style="margin-top:-4px">Nach jedem Backup wird zusätzlich auf alle aktivierten Ziele hochgeladen/repliziert.</p>
     <div class="toolbar"><button class="btn primary" id="new-target-btn">Neues Ziel</button></div>
@@ -1744,7 +1749,72 @@ async function settingsPage() {
     tbody.appendChild(row);
   });
   wrap.querySelector("#new-target-btn").addEventListener("click", () => openStorageTargetModal());
+  if (state.user && state.user.is_admin) {
+    wrap.querySelector("#netpulse-section").style.display = "";
+    renderNetPulseCard(wrap.querySelector("#netpulse-card"));
+  }
   return wrap;
+}
+
+// ---------- NetPulse-Kopplung ----------
+async function renderNetPulseCard(card) {
+  let cfg;
+  try { cfg = await api("/api/netpulse"); } catch (e) { card.innerHTML = `<span class="muted">${escHtml(e.message)}</span>`; return; }
+  const st = cfg.status || {};
+  card.innerHTML = `
+    <p style="margin:0 0 10px; font-size:.88rem;">Verbindet den Backup Manager mit <b>NetPulse</b>: Solange Container für ein Backup oder eine
+      Wiederherstellung gestoppt sind, pausiert NetPulse die Überwachung der zugehörigen Dienste – <b>keine Fehlalarme, keine Ausfälle im Verlauf</b>.
+      Nach dem Neustart überwacht NetPulse nach einer kurzen Nachlaufzeit wieder. Außerdem meldet der Backup Manager jedes Backup-Ergebnis an NetPulse
+      (dort gibt es Alarme für „Backup fehlgeschlagen“ und „Backup überfällig“). Den Schlüssel erzeugst du in NetPulse unter
+      <i>Verwaltung → Verbundene Programme → Programm verbinden</i>.</p>
+    <label style="display:flex; gap:8px; align-items:center; margin-bottom:12px;"><input type="checkbox" id="np-enabled" style="width:auto;" ${cfg.enabled ? "checked" : ""}/> Kopplung eingeschaltet</label>
+    <div class="grid cols-3">
+      <div class="field"><label>NetPulse-Adresse</label><input type="text" id="np-url" placeholder="z. B. http://10.10.10.15:18081" value="${escHtml(cfg.url || "")}" /></div>
+      <div class="field"><label>Schlüssel (npi_…)</label><input type="password" id="np-token" autocomplete="off" placeholder="${cfg.token_set ? "gespeichert – leer lassen zum Behalten" : "aus NetPulse kopieren"}" /></div>
+      <div class="field"><label>Nachlaufzeit nach dem Neustart (Sekunden)</label><input type="number" id="np-grace" min="0" max="1800" value="${cfg.grace_s}" /></div>
+      <div class="field"><label>Pause endet spätestens nach (Minuten)</label><input type="number" id="np-max" min="10" max="720" value="${cfg.max_minutes}" /></div>
+    </div>
+    <div style="display:flex; flex-wrap:wrap; gap:18px; margin-bottom:12px; font-size:.88rem;">
+      <label><input type="checkbox" id="np-pause" style="width:auto; margin-right:6px;" ${cfg.pause ? "checked" : ""}/>Überwachung während Backup/Restore pausieren</label>
+      <label><input type="checkbox" id="np-report" style="width:auto; margin-right:6px;" ${cfg.report ? "checked" : ""}/>Backup-Ergebnisse melden</label>
+      <label><input type="checkbox" id="np-verify" style="width:auto; margin-right:6px;" ${cfg.verify_tls ? "checked" : ""}/>Zertifikat prüfen (bei https mit eigenem Zertifikat ausschalten)</label>
+    </div>
+    <div class="toolbar" style="margin-bottom:6px;"><button class="btn primary" id="np-save">Speichern</button><button class="btn" id="np-test">Verbindung testen</button>
+      <span class="muted" style="font-size:.8rem;">${st.last_error ? `<span class="badge failed">Fehler</span> ${escHtml(st.last_error)} (${fmtDate(st.last_error_at)})`
+        : st.last_ok_at ? `<span class="badge ok">verbunden</span> zuletzt ${fmtDate(st.last_ok_at)}` : ""}</span></div>
+    <div id="np-result"></div>`;
+  const payload = () => ({
+    enabled: card.querySelector("#np-enabled").checked,
+    url: card.querySelector("#np-url").value.trim(),
+    token: card.querySelector("#np-token").value.trim() || null,
+    verify_tls: card.querySelector("#np-verify").checked,
+    pause: card.querySelector("#np-pause").checked,
+    report: card.querySelector("#np-report").checked,
+    grace_s: Number(card.querySelector("#np-grace").value || 0),
+    max_minutes: Number(card.querySelector("#np-max").value || 240),
+  });
+  card.querySelector("#np-save").addEventListener("click", async () => {
+    try {
+      await api("/api/netpulse", { method: "PUT", body: JSON.stringify(payload()) });
+      toast("NetPulse-Einstellungen gespeichert");
+      renderNetPulseCard(card);
+    } catch (e) { toast(e.message, "error"); }
+  });
+  card.querySelector("#np-test").addEventListener("click", async () => {
+    const out = card.querySelector("#np-result");
+    out.innerHTML = '<span class="muted">Teste …</span>';
+    try {
+      const r = await api("/api/netpulse/test", { method: "POST", body: JSON.stringify(payload()) });
+      const rows = r.subjects.map((s) => `<tr><td class="mono">${escHtml(s.name)}</td><td>${s.matches.length
+        ? s.matches.map((m) => `<span class="badge neutral" title="${escHtml(m.why)}">${m.kind === "device" ? "Gerät" : "Dienst"}: ${escHtml(m.label)}</span>`).join(" ")
+        : '<span class="muted">nichts zugeordnet</span>'}</td></tr>`).join("");
+      out.innerHTML = `<p style="font-size:.88rem;"><span class="badge ok">✓ Verbunden</span> mit ${escHtml(r.hello.app)} ${escHtml(r.hello.version || "")} als „${escHtml(r.hello.integration)}“.
+        So ordnet NetPulse deine Container zu (anpassen kannst du das in NetPulse unter <i>Verbundene Programme</i>):</p>
+        <div style="max-height:320px; overflow:auto;"><table><thead><tr><th>Container</th><th>Wird während des Backups pausiert</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    } catch (e) {
+      out.innerHTML = `<span class="badge failed">Fehler</span> <span style="font-size:.88rem;">${escHtml(e.message)}</span>`;
+    }
+  });
 }
 
 function openStorageTargetModal(existing) {

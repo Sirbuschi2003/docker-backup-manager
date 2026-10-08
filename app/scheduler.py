@@ -8,7 +8,7 @@ from pathlib import Path
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from app import backup_engine, event_log, job_tracker, restic_engine, storage_sync
+from app import backup_engine, event_log, job_tracker, netpulse, restic_engine, storage_sync
 from app.config import BACKUPS_DIR, TZ_NAME
 from app.database import SessionLocal
 from app.models import BackupRecord, Schedule
@@ -257,6 +257,16 @@ def start():
     scheduler.add_job(
         _purge_old_logs, CronTrigger(hour=3, minute=30, timezone=TZ_NAME),
         id="log-rotation", replace_existing=True,
+    )
+    # NetPulse-Kopplung: Containerliste stündlich und kurz nach dem Start übertragen (macht nichts, wenn aus)
+    scheduler.add_job(
+        netpulse.push_inventory, CronTrigger(minute=17, timezone=TZ_NAME),
+        id="netpulse-inventory", replace_existing=True,
+    )
+    scheduler.add_job(
+        netpulse.push_inventory, "date",
+        run_date=datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=30),
+        id="netpulse-inventory-startup", replace_existing=True,
     )
 
 

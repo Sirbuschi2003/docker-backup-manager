@@ -1,6 +1,6 @@
 # Docker Backup Manager
 
-> **Version 1.4.0** — webbasiertes Backup- und Restore-Tool für Docker-Container
+> **Version 1.5.0** — webbasiertes Backup- und Restore-Tool für Docker-Container
 
 Ein selbst gehostetes Web-Interface zum Sichern und Wiederherstellen von Docker-Containern — einzeln oder als komplette Gruppe (Landscape). Backups lassen sich lokal, auf SMB-Freigaben (NAS), S3-kompatiblen Diensten, Google Drive, OneDrive und vielen weiteren Cloud-Zielen speichern. Die gesamte Konfiguration erfolgt im Browser, kein Kommandozeilen-Wissen nötig.
 
@@ -47,6 +47,7 @@ Das Tool spricht ausschließlich mit der **Docker Engine API** (über den Docker
   - [Mehrere Benutzer anlegen (Benutzerverwaltung)](#mehrere-benutzer-anlegen-benutzerverwaltung)
   - [Passwort zurücksetzen](#passwort-zurücksetzen)
   - [Betrieb hinter einem Reverse-Proxy](#betrieb-hinter-einem-reverse-proxy)
+- [Kopplung mit NetPulse (Monitoring)](#kopplung-mit-netpulse-monitoring)
 - [Logs](#logs)
 - [Umgebungsvariablen – Referenz](#umgebungsvariablen--referenz)
 - [Entwicklung & Tests](#entwicklung--tests)
@@ -554,6 +555,17 @@ Das Session-Cookie wird dann nur noch über verschlüsselte Verbindungen übertr
 > **Sicherheitshinweis:** Der Container benötigt Zugriff auf den Docker-Socket — das entspricht faktisch Root-Rechten auf dem Host. Die Web-UI nicht ungeschützt ins öffentliche Internet stellen. Entweder per VPN absichern oder hinter einem Reverse-Proxy mit TLS und ggf. zusätzlicher IP-Beschränkung betreiben.
 
 ---
+
+## Kopplung mit NetPulse (Monitoring)
+
+Optional: Läuft im Heimnetz [NetPulse](https://github.com/Sirbuschi2003/NetPulse), greifen beide Programme ineinander.
+
+- **Keine Fehlalarme während Backups:** Bevor Container gestoppt werden („Container stoppen“), pausiert NetPulse die Überwachung der zugehörigen Dienste und Geräte – kein Alarm, kein Ausfall im Verlauf, kein Abzug bei der Verfügbarkeit. Nach dem Neustart überwacht NetPulse nach einer Nachlaufzeit (Standard 180 s) wieder. Bei Gruppen-Backups (Landscape) wird die ganze Gruppe für die Dauer des Laufs pausiert, bei Wiederherstellungen der wiederhergestellte Container.
+- **Sicherheitsnetz:** Jede Pause endet spätestens nach der eingestellten Höchstdauer (Standard 240 min) – auch wenn der Backup Manager abstürzt.
+- **Backup-Ergebnisse** (Erfolg/Fehler, Größe, Dauer) gehen an NetPulse; dort gibt es Alarme „Backup fehlgeschlagen“ und „Backup überfällig“.
+- **Containerliste** (Name, Compose-Projekt, veröffentlichte Ports, eigene IPs, ob per Zeitplan gesichert) wird stündlich übertragen – NetPulse ordnet daraus Dienste und Geräte zu.
+
+Einrichten: In NetPulse unter *Verbundene Programme → Programm verbinden* einen Schlüssel (`npi_…`) erzeugen, dann hier unter *Einstellungen → NetPulse-Überwachung* Adresse (z. B. `http://192.168.1.10:18081`) und Schlüssel eintragen, einschalten und *Verbindung testen*. Ist NetPulse nicht erreichbar, laufen Backups ganz normal weiter (Hinweis im Log, Kategorie `netpulse`).
 
 ## Logs
 

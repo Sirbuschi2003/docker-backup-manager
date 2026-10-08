@@ -11,7 +11,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app import backup_engine, event_log, job_tracker, restic_engine, storage_sync
+from app import backup_engine, event_log, job_tracker, netpulse, restic_engine, storage_sync
 from app.auth import get_current_user
 from app.config import BACKUPS_DIR
 from app.database import SessionLocal, get_db
@@ -488,6 +488,8 @@ def _run_restore_job(job_id: str, backup_path: str, new_name: Optional[str], sta
                       volume_base_dir: Optional[str] = None, overwrite: bool = False):
     label = new_name or Path(backup_path).parent.name
     event_log.log_event("restore", f"Restore von '{label}' gestartet")
+    # Während der Wiederherstellung ist der Container weg/gestoppt - NetPulse soll das nicht als Ausfall melden
+    np_pause = netpulse.pause([label], "Wiederherstellung")
     try:
         def progress(step, name, total=None):
             job_tracker.update_progress(job_id, step, name, total)
@@ -497,9 +499,13 @@ def _run_restore_job(job_id: str, backup_path: str, new_name: Optional[str], sta
                            volume_base_dir=volume_base_dir, overwrite=overwrite)
         job_tracker.finish_job(job_id, True)
         event_log.log_event("restore", f"Restore von '{label}' erfolgreich abgeschlossen")
+        netpulse.report(label, "ok", kind="restore")
     except Exception as exc:  # noqa: BLE001
         job_tracker.finish_job(job_id, False, str(exc))
         event_log.log_event("restore", f"Restore von '{label}' fehlgeschlagen: {exc}", level="error")
+        netpulse.report(label, "failed", str(exc), kind="restore")
+    finally:
+        netpulse.resume(np_pause)
 
 
 @router.post("/{backup_id}/restore")

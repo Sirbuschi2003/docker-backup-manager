@@ -11,7 +11,7 @@ from app import scheduler
 from app.config import SECRET_KEY, SESSION_COOKIE_NAME, SESSION_HTTPS_ONLY, SESSION_MAX_AGE
 from app.database import init_db
 from app.event_log import DBLogHandler
-from app.routers import auth, backups, containers, jobs, logs, schedules, settings
+from app.routers import auth, backups, containers, jobs, logs, netpulse, schedules, settings
 
 # dbm.* loggers have no handlers in uvicorn's default config (only uvicorn.* are
 # configured). Without this, all INFO messages from dbm.remote_cleanup etc. are
@@ -47,6 +47,7 @@ app.include_router(schedules.router)
 app.include_router(settings.router)
 app.include_router(jobs.router)
 app.include_router(logs.router)
+app.include_router(netpulse.router)
 
 app.mount("/assets", StaticFiles(directory=STATIC_DIR), name="assets")
 
