@@ -1,6 +1,6 @@
 # Docker Backup Manager
 
-> **Version 1.5.0** — webbasiertes Backup- und Restore-Tool für Docker-Container
+> **Version 1.5.1** — webbasiertes Backup- und Restore-Tool für Docker-Container
 
 Ein selbst gehostetes Web-Interface zum Sichern und Wiederherstellen von Docker-Containern — einzeln oder als komplette Gruppe (Landscape). Backups lassen sich lokal, auf SMB-Freigaben (NAS), S3-kompatiblen Diensten, Google Drive, OneDrive und vielen weiteren Cloud-Zielen speichern. Die gesamte Konfiguration erfolgt im Browser, kein Kommandozeilen-Wissen nötig.
 

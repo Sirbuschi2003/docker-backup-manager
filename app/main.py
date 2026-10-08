@@ -3,12 +3,12 @@ import sys
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
 from app import scheduler
-from app.config import SECRET_KEY, SESSION_COOKIE_NAME, SESSION_HTTPS_ONLY, SESSION_MAX_AGE
+from app.config import APP_VERSION, SECRET_KEY, SESSION_COOKIE_NAME, SESSION_HTTPS_ONLY, SESSION_MAX_AGE
 from app.database import init_db
 from app.event_log import DBLogHandler
 from app.routers import auth, backups, containers, jobs, logs, netpulse, schedules, settings
@@ -52,14 +52,29 @@ app.include_router(netpulse.router)
 app.mount("/assets", StaticFiles(directory=STATIC_DIR), name="assets")
 
 
+@app.middleware("http")
+async def no_stale_assets(request, call_next):
+    # Nach einem Update sofort die neue Oberfläche: der Browser fragt jedes Mal kurz nach (sonst 304)
+    response = await call_next(request)
+    if not request.url.path.startswith("/api/"):
+        response.headers.setdefault("Cache-Control", "no-cache")
+    return response
+
+
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}
 
 
+_INDEX_HTML = (STATIC_DIR / "index.html").read_text(encoding="utf-8").replace(
+    "/assets/js/app.js", f"/assets/js/app.js?v={APP_VERSION}").replace(
+    "/assets/css/style.css", f"/assets/css/style.css?v={APP_VERSION}")
+
+
 @app.get("/{full_path:path}")
 def spa(full_path: str):
-    return FileResponse(STATIC_DIR / "index.html")
+    # Versionsnummer an Skript/Stylesheet: neue Version = neue Adresse = kein alter Stand aus dem Cache
+    return HTMLResponse(_INDEX_HTML)
 
 
 @app.on_event("startup")
